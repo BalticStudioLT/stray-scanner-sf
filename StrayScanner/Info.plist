@@ -24,6 +24,15 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>To send scans to your SplatForge PC.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>To record the phone's motion with the ultra-wide video.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>For recording datasets.</string>
 	<key>UIApplicationSceneManifest</key>

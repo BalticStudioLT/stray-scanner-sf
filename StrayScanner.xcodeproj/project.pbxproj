@@ -25,6 +25,10 @@
 		3863FE5F25FCBB0E00C1DA4F /* NewSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E969CA2572608E00054CC4 /* NewSession.swift */; };
 		3863FE6225FCBB0E00C1DA4F /* RecordSessionViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38FB730E2572A9FA007D9CB0 /* RecordSessionViewController.swift */; };
 		3863FE6325FCBB0E00C1DA4F /* SessionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38045D572561A7370004F23C /* SessionRow.swift */; };
+		70D1A30B2E1800000027BEEF /* SplatForgeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A30A2E1800000027BEEF /* SplatForgeView.swift */; };
+		70D1A30C2E1800000027BEEF /* SplatForgeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A30A2E1800000027BEEF /* SplatForgeView.swift */; };
+		70D1A20B2E1800000027BEEF /* PCLinkSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A20A2E1800000027BEEF /* PCLinkSettingsView.swift */; };
+		70D1A20C2E1800000027BEEF /* PCLinkSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A20A2E1800000027BEEF /* PCLinkSettingsView.swift */; };
 		70D1275B2E1800000027BEEF /* ScanSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1275A2E1800000027BEEF /* ScanSummary.swift */; };
 		70D1275C2E1800000027BEEF /* ScanSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1275A2E1800000027BEEF /* ScanSummary.swift */; };
 		70D1274B2E1800000027BEEF /* GlassControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1274A2E1800000027BEEF /* GlassControls.swift */; };
@@ -62,6 +66,8 @@
 		38694C8326D2C66F00546EA1 /* AppDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38694C7326D2C66F00546EA1 /* AppDaemon.swift */; };
 		70D1234B2E1800000027BEEF /* DistortionEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1234A2E1800000027BEEF /* DistortionEncoder.swift */; };
 		70D1234C2E1800000027BEEF /* DistortionEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1234A2E1800000027BEEF /* DistortionEncoder.swift */; };
+		70D1A10B2E1800000027BEEF /* PCLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A10A2E1800000027BEEF /* PCLink.swift */; };
+		70D1A10C2E1800000027BEEF /* PCLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A10A2E1800000027BEEF /* PCLink.swift */; };
 		70D127FB2E1800000027BEEF /* WallSweepGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D127FA2E1800000027BEEF /* WallSweepGuide.swift */; };
 		70D127FC2E1800000027BEEF /* WallSweepGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D127FA2E1800000027BEEF /* WallSweepGuide.swift */; };
 		70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
@@ -104,6 +110,8 @@
 		09A6D95A8151C51C3ECF4131 /* Pods-StrayScanner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-StrayScanner.release.xcconfig"; path = "Target Support Files/Pods-StrayScanner/Pods-StrayScanner.release.xcconfig"; sourceTree = "<group>"; };
 		70D1274A2E1800000027BEEF /* GlassControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassControls.swift; sourceTree = "<group>"; };
 		70D1275A2E1800000027BEEF /* ScanSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanSummary.swift; sourceTree = "<group>"; };
+		70D1A20A2E1800000027BEEF /* PCLinkSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCLinkSettingsView.swift; sourceTree = "<group>"; };
+		70D1A30A2E1800000027BEEF /* SplatForgeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatForgeView.swift; sourceTree = "<group>"; };
 		38045D572561A7370004F23C /* SessionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRow.swift; sourceTree = "<group>"; };
 		38045D592561AC000004F23C /* SessionList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionList.swift; sourceTree = "<group>"; };
 		3807420A27BBCE83003194C1 /* PngEncoder.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PngEncoder.mm; sourceTree = "<group>"; };
@@ -135,6 +143,7 @@
 		70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanQualityMonitor.swift; sourceTree = "<group>"; };
 		70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameQualityEncoder.swift; sourceTree = "<group>"; };
 		70D127FA2E1800000027BEEF /* WallSweepGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallSweepGuide.swift; sourceTree = "<group>"; };
+		70D1A10A2E1800000027BEEF /* PCLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCLink.swift; sourceTree = "<group>"; };
 		70D1234A2E1800000027BEEF /* DistortionEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DistortionEncoder.swift; sourceTree = "<group>"; };
 		386E277725991163007D023B /* RecordButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordButton.swift; sourceTree = "<group>"; };
 		3872B88825962BBA00A3370C /* Colors.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Colors.xcassets; sourceTree = "<group>"; };
@@ -213,6 +222,8 @@
 			isa = PBXGroup;
 			children = (
 				38045D572561A7370004F23C /* SessionRow.swift */,
+				70D1A30A2E1800000027BEEF /* SplatForgeView.swift */,
+				70D1A20A2E1800000027BEEF /* PCLinkSettingsView.swift */,
 				70D1275A2E1800000027BEEF /* ScanSummary.swift */,
 				70D1274A2E1800000027BEEF /* GlassControls.swift */,
 				38045D592561AC000004F23C /* SessionList.swift */,
@@ -288,6 +299,7 @@
 				38694C7126D2C66F00546EA1 /* OdometryEncoder.swift */,
 				38694C7226D2C66F00546EA1 /* DepthEncoder.swift */,
 				70D1234A2E1800000027BEEF /* DistortionEncoder.swift */,
+				70D1A10A2E1800000027BEEF /* PCLink.swift */,
 				70D127FA2E1800000027BEEF /* WallSweepGuide.swift */,
 				70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */,
 				70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */,
@@ -544,6 +556,8 @@
 				38694C7E26D2C66F00546EA1 /* OdometryEncoder.swift in Sources */,
 				38694C7826D2C66F00546EA1 /* VideoEncoder.swift in Sources */,
 				38045D582561A7370004F23C /* SessionRow.swift in Sources */,
+				70D1A30B2E1800000027BEEF /* SplatForgeView.swift in Sources */,
+				70D1A20B2E1800000027BEEF /* PCLinkSettingsView.swift in Sources */,
 				70D1275B2E1800000027BEEF /* ScanSummary.swift in Sources */,
 				70D1274B2E1800000027BEEF /* GlassControls.swift in Sources */,
 				38694C7426D2C66F00546EA1 /* DatasetEncoder.swift in Sources */,
@@ -562,6 +576,7 @@
 				709259192E0B79AB00A7B62E /* ShareUtility.swift in Sources */,
 				38694C8026D2C66F00546EA1 /* DepthEncoder.swift in Sources */,
 				70D1234B2E1800000027BEEF /* DistortionEncoder.swift in Sources */,
+				70D1A10B2E1800000027BEEF /* PCLink.swift in Sources */,
 				70D127FB2E1800000027BEEF /* WallSweepGuide.swift in Sources */,
 				70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
 				70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
@@ -585,6 +600,8 @@
 				38694C7F26D2C66F00546EA1 /* OdometryEncoder.swift in Sources */,
 				38694C7926D2C66F00546EA1 /* VideoEncoder.swift in Sources */,
 				3863FE6325FCBB0E00C1DA4F /* SessionRow.swift in Sources */,
+				70D1A30C2E1800000027BEEF /* SplatForgeView.swift in Sources */,
+				70D1A20C2E1800000027BEEF /* PCLinkSettingsView.swift in Sources */,
 				70D1275C2E1800000027BEEF /* ScanSummary.swift in Sources */,
 				70D1274C2E1800000027BEEF /* GlassControls.swift in Sources */,
 				38694C7526D2C66F00546EA1 /* DatasetEncoder.swift in Sources */,
@@ -603,6 +620,7 @@
 				70CF35492E17803700276207 /* ShareUtility.swift in Sources */,
 				38694C8126D2C66F00546EA1 /* DepthEncoder.swift in Sources */,
 				70D1234C2E1800000027BEEF /* DistortionEncoder.swift in Sources */,
+				70D1A10C2E1800000027BEEF /* PCLink.swift in Sources */,
 				70D127FC2E1800000027BEEF /* WallSweepGuide.swift in Sources */,
 				70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
 				70D1272C2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,

@@ -23,6 +23,8 @@ final class PointCloudAccumulator {
     let capacity: Int
     let buffer: MTLBuffer
     private(set) var count: Int = 0
+    /// Points ever appended (keeps counting past the ring buffer's capacity); used by the PC live link.
+    private(set) var totalAppended: Int = 0
     private var writeIndex: Int = 0
     private var fineVoxels = Set<Int64>()
 
@@ -68,6 +70,7 @@ final class PointCloudAccumulator {
     func reset() {
         count = 0
         writeIndex = 0
+        totalAppended = 0
         fineVoxels.removeAll(keepingCapacity: true)
         coverageSlots.removeAll(keepingCapacity: true)
         coverageMasks.removeAll(keepingCapacity: true)
@@ -113,6 +116,7 @@ final class PointCloudAccumulator {
         pointer[writeIndex] = vertex
         writeIndex = (writeIndex + 1) % capacity
         count = min(count + 1, capacity)
+        totalAppended += 1
     }
 
     private func voxelKey(_ p: SIMD3<Float>, size: Float) -> Int64 {

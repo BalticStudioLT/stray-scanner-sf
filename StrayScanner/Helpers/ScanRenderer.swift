@@ -75,7 +75,8 @@ final class MetalPreviewView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let scale = traitCollection.displayScale
+        // 2× is sharp enough for a preview and draws ~45 % fewer pixels than 3× on Pro phones.
+        let scale = min(traitCollection.displayScale, 2.0)
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
     }
@@ -101,6 +102,8 @@ final class ScanRenderer {
         didSet { pointCloud.lowPower = lowPower }
     }
     private var frameNumber = 0
+    /// Draw the main preview every Nth camera frame (2 at 60 fps → 30 fps preview, saves GPU and battery).
+    var previewInterval: Int = 2
 
     private let layer: CAMetalLayer
     private let device: MTLDevice
@@ -192,7 +195,8 @@ final class ScanRenderer {
         // Always grow the point cloud so switching to it shows the whole scan so far.
         pointCloud.add(frame: frame)
         uploadGuides()
-        if lowPower && frameNumber % 2 == 0 { return }
+        let interval = previewInterval * (lowPower ? 2 : 1)
+        if frameNumber % max(interval, 1) != 0 { return }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         var keepAlive: [CVMetalTexture] = []
@@ -213,9 +217,8 @@ final class ScanRenderer {
             }
         }
 
-        // Small views refresh at 30 fps (15 fps when hot) to save power.
-        let insetInterval = lowPower ? 4 : 2
-        if frameNumber % insetInterval == 0 {
+        // Small views refresh at half the preview rate.
+        if (frameNumber / max(interval, 1)) % 2 == 0 {
             if let inset = cameraInsetLayer, let drawable = inset.nextDrawable() {
                 encodeQuad(commandBuffer, drawable: drawable, pipeline: cameraPipeline, textures: textures, needsCamera: true, needsDepth: false)
                 drawables.append(drawable)

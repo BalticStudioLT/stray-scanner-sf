@@ -23,7 +23,7 @@ class VideoEncoder {
     private var videoWriter: AVAssetWriter?
     private var videoWriterInput: AVAssetWriterInput?
     private var videoAdapter: AVAssetWriterInputPixelBufferAdaptor?
-    private let timeScale = CMTimeScale(60)
+    private let timeScale: CMTimeScale
     public let width: CGFloat
     public let height: CGFloat
     private let systemBootedAt: TimeInterval
@@ -32,7 +32,8 @@ class VideoEncoder {
     public var filePath: URL
     public var status: EncodingStatus = EncodingStatus.allGood
 
-    init(file: URL, width: CGFloat, height: CGFloat) {
+    init(file: URL, width: CGFloat, height: CGFloat, framesPerSecond: Int = 60) {
+        self.timeScale = CMTimeScale(max(framesPerSecond, 1))
         self.systemBootedAt = ProcessInfo.processInfo.systemUptime
         self.filePath = file
         self.width = width

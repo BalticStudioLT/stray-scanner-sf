@@ -47,6 +47,7 @@ class SessionListViewModel: ObservableObject {
 struct SessionList: View {
     @ObservedObject var viewModel = SessionListViewModel()
     @State private var showingInfo = false
+    @State private var showingPCLink = false
 
     var body: some View {
         NavigationStack {
@@ -92,6 +93,12 @@ struct SessionList: View {
             .navigationTitle("Scans")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
+                    NavigationLink(destination: SplatForgeView()) {
+                        Image(systemName: "desktopcomputer")
+                    }
+                    .accessibilityLabel("SplatForge on the PC")
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button {
                         showingInfo.toggle()
                     } label: {
@@ -102,6 +109,9 @@ struct SessionList: View {
             }
             .sheet(isPresented: $showingInfo) {
                 InformationView()
+            }
+            .sheet(isPresented: $showingPCLink) {
+                PCLinkSettingsView()
             }
             .onAppear {
                 DispatchQueue.main.async {

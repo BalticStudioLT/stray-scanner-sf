@@ -51,6 +51,8 @@ struct SessionDetailView: View {
     @State private var player: AVPlayer?
     @State private var shareError: String?
     @State private var summary: ScanSummary?
+    @State private var pcStatus: String?
+    @State private var pcProgress: Double?
 
     let defaultUrl = URL(fileURLWithPath: "")
 
@@ -86,7 +88,24 @@ struct SessionDetailView: View {
                 .padding(.top, 12)
             }
 
+            if let status = pcStatus {
+                VStack(spacing: 6) {
+                    if let progress = pcProgress {
+                        ProgressView(value: progress)
+                    }
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 10)
+            }
+
             HStack(spacing: 20) {
+                Button(action: sendToPC) {
+                    Label("PC", systemImage: "desktopcomputer")
+                }
+                .glassButton()
+                .disabled(pcProgress != nil)
+
                 Button(action: shareItem) {
                     HStack {
                         if isCreatingPackage {
@@ -120,6 +139,12 @@ struct SessionDetailView: View {
             .padding(.top, 20)
             Spacer()
         }
+        .onReceive(NotificationCenter.default.publisher(for: PCUploader.statusNotification)) { note in
+            guard let scan = note.userInfo?["scan"] as? String,
+                  scan == recording.directoryPath()?.lastPathComponent else { return }
+            pcStatus = note.userInfo?["message"] as? String
+            pcProgress = note.userInfo?["progress"] as? Double
+        }
         .onAppear {
             guard summary == nil else { return }
             let directory = recording.directoryPath()
@@ -151,6 +176,13 @@ struct SessionDetailView: View {
             Text(shareError ?? "")
         }
         }
+    }
+
+    func sendToPC() {
+        guard let folder = recording.directoryPath() else { return }
+        pcStatus = "Starting…"
+        pcProgress = 0
+        PCUploader.shared.upload(directory: folder)
     }
 
     func deleteItem() {

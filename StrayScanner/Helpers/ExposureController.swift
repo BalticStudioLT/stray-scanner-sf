@@ -161,6 +161,15 @@ final class ExposureController {
         return duration
     }
 
+    var currentISO: Float { return device?.iso ?? 0 }
+
+    /// Sets a fixed ISO at the current shutter (custom exposure only; ignored in Auto).
+    func setFixedISO(_ iso: Float) {
+        guard let device = device, let denominator = setting.denominator else { return }
+        let duration = clampedDuration(CMTime(value: 1, timescale: denominator), device: device)
+        setCustomExposure(device: device, duration: duration, iso: iso)
+    }
+
     // MARK: - Torch
 
     var hasTorch: Bool { return device?.hasTorch ?? false }

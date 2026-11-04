@@ -32,6 +32,8 @@ class DatasetEncoder {
     public private(set) var droppedFrames: Int = 0
     public var savedFrameCount: Int { return savedFrames }
     public var markerCount: Int { return markerEncoder.count }
+    private let videoFramesPerSecond: Int
+    private let videoSize: CGSize
     public var directory: URL { return datasetDirectory }
     private var lastFrame: ARFrame?
     private var dispatchGroup = DispatchGroup()
@@ -61,11 +63,13 @@ class DatasetEncoder {
         
         let width = arConfiguration.videoFormat.imageResolution.width
         let height = arConfiguration.videoFormat.imageResolution.height
+        self.videoFramesPerSecond = arConfiguration.videoFormat.framesPerSecond
+        self.videoSize = CGSize(width: width, height: height)
         var theId: UUID = UUID()
         datasetDirectory = DatasetEncoder.createDirectory(id: &theId)
         self.id = theId
         self.rgbFilePath = datasetDirectory.appendingPathComponent("rgb.mp4")
-        self.rgbEncoder = VideoEncoder(file: self.rgbFilePath, width: width, height: height)
+        self.rgbEncoder = VideoEncoder(file: self.rgbFilePath, width: width, height: height, framesPerSecond: arConfiguration.videoFormat.framesPerSecond)
         self.depthFilePath = datasetDirectory.appendingPathComponent("depth", isDirectory: true)
         self.depthEncoder = DepthEncoder(outDirectory: self.depthFilePath)
         let confidenceFilePath = datasetDirectory.appendingPathComponent("confidence", isDirectory: true)
@@ -113,6 +117,13 @@ class DatasetEncoder {
     func writeCaptureSettings(_ settings: [String: Any]) {
         var info = settings
         info["fps_divider"] = frameInterval
+        info["video_width"] = Int(videoSize.width)
+        info["video_height"] = Int(videoSize.height)
+        info["video_fps"] = videoFramesPerSecond
+        // Upstream Stray Scanner gave the first frame a negative timestamp, so the video lost it and
+        // video frame i belonged to odometry row i + 1. Fixed here: video frame i == odometry row i
+        // == depth/confidence i. Importers: use offset 0 when this key is present, 1 when it is missing.
+        info["video_frame_offset"] = 0
         do {
             let data = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: captureSettingsPath)
@@ -122,8 +133,9 @@ class DatasetEncoder {
     }
 
     func add(frame: ARFrame, quality: FrameQuality? = nil) {
-        let totalFrames: Int = currentFrame
         currentFrame = currentFrame + 1
+        // Presentation index of this frame in rgb.mp4 (starts at 0; see video_frame_offset).
+        let totalFrames: Int = currentFrame
         if (currentFrame % frameInterval != 0) {
             return
         }

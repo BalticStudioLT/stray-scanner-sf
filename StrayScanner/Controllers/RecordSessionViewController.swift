@@ -87,6 +87,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var autoDimmedForHeat = false
     private var cpuUsage: Double = 0
     private var frameCounter = 0
+    private var liveLink: PCLiveLink?
+    private var torchCalibrationTimer: Timer?
+    private var torchCalibrating = false
+    private var isoTorchOff: Float?
+    private var isoTorchOn: Float?
+    static let use4KKey = "Use4KVideo"
     var dismissFunction: Optional<() -> Void> = Optional.none
 
     // MARK: Views
@@ -158,6 +164,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         super.viewDidAppear(animated)
         UIApplication.shared.isIdleTimerDisabled = true
         startSession()
+        updateFpsSetting()
+        let pcSettings = PCLinkSettings.load()
+        if pcSettings.live, let link = PCLiveLink(settings: pcSettings) {
+            liveLink = link
+            link.connect(scanName: nil, frame: nil)
+        }
         uiTimer?.invalidate()
         uiTimer = Timer.scheduledTimer(timeInterval: 0.25, target: self, selector: #selector(uiTick), userInfo: nil, repeats: true)
     }
@@ -167,6 +179,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         uiTimer?.invalidate()
         uiTimer = nil
         setTorchMode(.off)
+        liveLink?.disconnect()
+        liveLink = nil
         restoreBrightness()
         UIApplication.shared.isIdleTimerDisabled = false
         datasetEncoder = nil
@@ -179,13 +193,19 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func startSession() {
         let config = ARWorldTrackingConfiguration()
+        if UserDefaults.standard.bool(forKey: RecordSessionViewController.use4KKey),
+           let format = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+            config.videoFormat = format
+        }
         arConfiguration = config
+        renderer?.previewInterval = max(1, config.videoFormat.framesPerSecond / 30)
         if !ARWorldTrackingConfiguration.isSupported || !ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             print("AR is not supported.")
             unsupported = true
         } else {
             config.frameSemantics.insert(.sceneDepth)
-            config.planeDetection = [.vertical]
+            // Plane detection costs CPU; only the wall path guide needs it.
+            config.planeDetection = wallGuide.isActive ? [.vertical] : []
             if let folder = continueFrom,
                let data = try? Data(contentsOf: folder.appendingPathComponent(DatasetEncoder.worldMapFileName)),
                let map = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
@@ -518,8 +538,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             settings["relocalized_at_start"] = relocalized
         }
         datasetEncoder?.writeCaptureSettings(settings)
+        if torchMode == .alternate, let on = isoTorchOn, let off = isoTorchOff {
+            settings["iso_torch_on"] = on
+            settings["iso_torch_off"] = off
+        }
         worldMapTimer?.invalidate()
         worldMapTimer = Timer.scheduledTimer(timeInterval: 20, target: self, selector: #selector(saveWorldMap), userInfo: nil, repeats: true)
+        liveLink?.notifyRecording(scan: datasetEncoder?.directory.lastPathComponent, started: true)
         startRawIMU()
         updateTime()
     }
@@ -547,6 +572,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             switch encoder.status {
                 case .allGood:
                     saveRecording(started, encoder)
+                    liveLink?.notifyRecording(scan: encoder.directory.lastPathComponent, started: false)
+                    if PCLinkSettings.load().autoUpload {
+                        PCUploader.shared.upload(directory: encoder.directory)
+                    }
                 case .videoEncodingError:
                     showError()
                 case .directoryCreationError:
@@ -671,7 +700,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func updateFpsSetting() {
-        Glass.setTitle(fpsButton, "\(AvailableFpsSettings[chosenFpsSetting]) fps")
+        let base = arConfiguration?.videoFormat.framesPerSecond ?? 60
+        let fps = max(base / FpsDividers[chosenFpsSetting], 1)
+        Glass.setTitle(fpsButton, "\(fps) fps")
     }
 
     private func updateShutterButton() {
@@ -690,11 +721,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         frameCounter += 1
         qualityMonitor.update(frame: frame, recording: recording)
         if case .normal = frame.camera.trackingState { relocalized = true }
-        if wallGuide.isActive {
-            wallGuide.update(frame: frame)
-            if frameCounter % 3 == 0 { renderer?.guideVertices = wallGuide.vertices() }
-        } else if !(renderer?.guideVertices.isEmpty ?? true) {
-            renderer?.guideVertices = []
+        if wallGuide.isActive { wallGuide.update(frame: frame) }
+        if frameCounter % 3 == 0 {
+            var guides = wallGuide.isActive ? wallGuide.vertices() : []
+            if let markers = liveLink?.markers { guides += markers }
+            renderer?.guideVertices = guides
         }
         renderer?.render(frame: frame)
         if recording {
@@ -702,9 +733,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 var quality = qualityMonitor.currentQuality()
                 quality.torchLevel = exposureController.torchLevel
                 encoder.add(frame: frame, quality: quality)
+                liveLink?.update(frame: frame, savedFrame: encoder.savedFrameCount - 1, quality: quality,
+                                 pointCloud: renderer?.pointCloud, recording: true)
             } else {
                 print("There is no video encoder. That can't be good.")
             }
+        } else if let link = liveLink {
+            var quality = qualityMonitor.currentQuality()
+            quality.torchLevel = exposureController.torchLevel
+            link.update(frame: frame, savedFrame: nil, quality: quality, pointCloud: renderer?.pointCloud, recording: false)
         }
     }
 
@@ -724,8 +761,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                                            thermalState: thermal,
                                            freeMinutes: freeMinutes)
         if advice.level.rawValue < ScanAdvice.Level.warning.rawValue {
-            if continueFrom != nil && !relocalized {
+            if torchCalibrating {
+                advice = ScanAdvice(level: .info, text: "Calibrating light — hold still for 3 s", symbolName: "bolt.badge.clock")
+            } else if continueFrom != nil && !relocalized {
                 advice = ScanAdvice(level: .warning, text: "Continuing: point at the area you scanned last to line up", symbolName: "arrow.triangle.2.circlepath")
+            } else if let pcHint = liveLink?.currentHint {
+                advice = pcHint
             } else if let guide = wallGuide.advice() {
                 advice = guide
             }
@@ -823,7 +864,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         torchMode = mode
         torchTimer?.invalidate()
         torchTimer = nil
-        exposureController.freezeISO = mode == .alternate
+        torchCalibrationTimer?.invalidate()
+        torchCalibrationTimer = nil
+        torchCalibrating = false
+        exposureController.freezeISO = false
         var configuration = flashButton.configuration
         configuration?.image = UIImage(systemName: mode.symbolName)
         flashButton.configuration = configuration
@@ -836,15 +880,38 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             torchIsOn = true
             exposureController.setTorch(on: true)
         case .alternate:
+            // Calibrate: let auto-ISO settle with the light off, then on, and remember both ISOs, so the
+            // lit frames use a lower ISO and don't burn out. (In Auto shutter iOS handles exposure itself.)
+            torchIsOn = false
+            exposureController.setTorch(on: false)
+            isoTorchOff = nil
+            isoTorchOn = nil
+            torchCalibrating = true
+            torchCalibrationTimer = Timer.scheduledTimer(timeInterval: 1.5, target: self, selector: #selector(calibrationStep), userInfo: nil, repeats: true)
+        }
+    }
+
+    @objc private func calibrationStep() {
+        if isoTorchOff == nil {
+            isoTorchOff = exposureController.currentISO
             torchIsOn = true
             exposureController.setTorch(on: true)
-            torchTimer = Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(toggleTorch), userInfo: nil, repeats: true)
+            return
         }
+        isoTorchOn = exposureController.currentISO
+        torchCalibrationTimer?.invalidate()
+        torchCalibrationTimer = nil
+        torchCalibrating = false
+        exposureController.freezeISO = true
+        torchTimer = Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(toggleTorch), userInfo: nil, repeats: true)
     }
 
     @objc private func toggleTorch() {
         torchIsOn.toggle()
         exposureController.setTorch(on: torchIsOn)
+        if let iso = torchIsOn ? isoTorchOn : isoTorchOff {
+            exposureController.setFixedISO(iso)
+        }
     }
 
     // MARK: - Views menu
@@ -873,6 +940,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             UIAction(title: "Off", state: wallGuide.spacing == nil ? .on : .off) { [weak self] _ in
                 self?.wallGuide.spacing = nil
                 self?.layersButton.menu = self?.makeLayersMenu()
+                self?.refreshPlaneDetection()
             }
         ]
         for spacing in WallSweepGuide.spacings {
@@ -880,10 +948,30 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             guideItems.append(UIAction(title: "Stripes every \(cm) cm", state: wallGuide.spacing == spacing ? .on : .off) { [weak self] _ in
                 self?.wallGuide.spacing = spacing
                 self?.layersButton.menu = self?.makeLayersMenu()
+                self?.refreshPlaneDetection()
             })
         }
         let guide = UIMenu(title: "Wall path guide (sweep floor ↔ ceiling)", options: .displayInline, children: guideItems)
-        return UIMenu(title: "", children: [insets, cloud, guide])
+        let has4K = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution != nil
+        var fourK = toggle(has4K ? "4K video (30 fps, ~2× file size)" : "4K video (not supported on this phone)",
+                           "4k.tv", RecordSessionViewController.use4KKey) { [weak self] in
+            self?.startSession()
+            self?.updateFpsSetting()
+        }
+        if !has4K || startedRecording != nil {
+            fourK = UIAction(title: fourK.title, image: fourK.image, attributes: .disabled, state: fourK.state) { _ in }
+        }
+        let capture = UIMenu(title: "Capture", options: .displayInline, children: [fourK])
+        return UIMenu(title: "", children: [insets, cloud, guide, capture])
+    }
+
+    /// Turns ARKit plane detection on/off without resetting tracking.
+    private func refreshPlaneDetection() {
+        guard let config = arConfiguration, !unsupported else { return }
+        let wanted: ARWorldTrackingConfiguration.PlaneDetection = wallGuide.isActive ? [.vertical] : []
+        guard config.planeDetection != wanted else { return }
+        config.planeDetection = wanted
+        session.run(config)
     }
 
     private func applyInsetSettings() {
@@ -941,6 +1029,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             let battery = UIDevice.current.batteryLevel
             if battery >= 0 { storage += String(format: " · battery %.0f%%", battery * 100) }
             lines += [frames, surface, storage, heat]
+            if let link = liveLink { lines.append(link.statusText) }
         }
         statsLabel.text = lines.joined(separator: "\n")
     }

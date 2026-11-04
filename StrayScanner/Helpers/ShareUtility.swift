@@ -36,6 +36,14 @@ class ShareUtility {
         }
     }
     
+    /// Zips a scan folder into the temporary directory (synchronous; call off the main thread).
+    static func createZipArchive(directory: URL) throws -> URL {
+        let archiveURL = FileManager.default.temporaryDirectory.appendingPathComponent(directory.lastPathComponent + "-upload.zip")
+        try? FileManager.default.removeItem(at: archiveURL)
+        try createZipArchive(sourceDirectory: directory, destinationURL: archiveURL)
+        return archiveURL
+    }
+
     private static func createZipArchive(sourceDirectory: URL, destinationURL: URL) throws {
         let coordinator = NSFileCoordinator()
         var coordinatorError: NSError?
