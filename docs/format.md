@@ -22,6 +22,8 @@ distortion/          (optional, present when lens distortion data is available)
   - 000001.bin
   - ...
 rgb.mp4
+exposure.csv         (stray-scanner-sf fork only)
+capture_settings.json (stray-scanner-sf fork only)
 ```
 
 `rgb.mp4` is an HEVC encoded video, which contains the recorded data from the iPhone's camera.
@@ -66,3 +68,39 @@ The `imu.csv` file contains timestamps, linear acceleration readings and angular
 | alpha\_y | Rotation in rad/s around the y-axis |
 | alpha\_z | Rotation in rad/s around the z-axis |
 
+
+## Exposure data (stray-scanner-sf fork)
+
+This fork adds two files. All files above are unchanged, so existing tools keep working and can ignore the new ones.
+
+`exposure.csv` holds the real exposure of every saved frame. The first line is a header. There is exactly one row per row of `odometry.csv`, with the same `timestamp` and `frame` values.
+
+| Field | <div style="width: 500px">Meaning</div> |
+|---|---|
+| timestamp | Timestamp in seconds (same as `odometry.csv`) |
+| frame | Frame number, e.g. `000005` (same as `odometry.csv`, `depth/`, `confidence/`) |
+| exposure_duration_s | Exposure (shutter) time of the frame in seconds, from `ARFrame.camera.exposureDuration`. 1/250 s ≈ `0.004` |
+| exposure_offset | `ARFrame.camera.exposureOffset`, the exposure offset ARKit reports for the frame (EV) |
+| iso | ISO of the capture device when the frame arrived |
+| white_balance_r | Red white balance gain of the capture device (`deviceWhiteBalanceGains`) |
+| white_balance_g | Green white balance gain |
+| white_balance_b | Blue white balance gain |
+
+`iso` and the white balance columns are empty if the device does not expose a configurable capture device.
+
+`capture_settings.json` describes how the scan was recorded, written when recording starts:
+
+| Key | Meaning |
+|---|---|
+| shutter_setting | `"Auto"`, `"1/120"`, `"1/250"` or `"1/500"` (the selector in the record screen) |
+| requested_exposure_duration_s | Requested shutter time in seconds, `null` for Auto |
+| iso_mode | `"auto"` (stock automatic exposure) or `"auto_shutter_priority"` (fixed shutter, ISO follows the meter between the device's min and max ISO) |
+| white_balance_locked, focus_locked | Whether white balance and focus were locked for the recording |
+| white_balance_gains_at_start | `[r, g, b]` gains at the start of recording |
+| lens_position_at_start | Locked focus lens position (0 = near, 1 = far) |
+| iso_at_start, exposure_duration_s_at_start | Exposure at the start of recording |
+| iso_min, iso_max, exposure_duration_min_s, exposure_duration_max_s | Limits of the active camera format |
+| exposure_control_available | `false` if the device does not support exposure control (then everything is automatic) |
+| fps_divider | Every n-th camera frame was saved (1 = 60 fps, 2 = 30 fps, ...) |
+
+Note: with a fixed shutter the ISO is still adjusted automatically while recording (in small steps, about 5 times per second) so the brightness stays usable when you move between bright and dark areas. Use the per-frame `iso` column if you need photometric consistency.

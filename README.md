@@ -1,5 +1,20 @@
 
-# Stray Scanner App
+# Stray Scanner App — stray-scanner-sf fork
+
+This is a fork of [strayrobots/scanner](https://github.com/strayrobots/scanner) (MIT licence) made for capturing scans for Gaussian splatting (SplatForge). Changes from upstream:
+
+- **Short shutter.** A selector in the record screen (next to the fps button) chooses `Auto exp` (stock behaviour), `1/120 s`, `1/250 s` or `1/500 s` (default `1/250 s`). It uses `ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera` to set a custom exposure duration; ISO follows the light meter, clamped to the device's min/max ISO. ARKit tracking and LiDAR depth run exactly as before.
+- **White balance and focus are locked while recording** so colours and sharpness don't drift between frames; they unlock when recording stops.
+- **`exposure.csv`**: per-frame exposure time, exposure offset, ISO and white balance gains, frame numbers identical to `odometry.csv`. **`capture_settings.json`**: the chosen shutter setting and lock state. See [docs/format.md](docs/format.md#exposure-data-stray-scanner-sf-fork).
+- All existing files (`rgb.mp4`, `depth/`, `confidence/`, `distortion/`, `odometry.csv`, `imu.csv`, `camera_matrix.csv`) are written exactly as upstream.
+- Minimum iOS is 16.0. Bundle id `lt.nuskenuota.strayscanner`, app name "Stray SF", so it installs next to the App Store version.
+- Installing with a free Apple ID (7-day signing): see [REINSTALL.md](REINSTALL.md).
+
+A shorter shutter means less motion blur but a darker / noisier image in dim rooms; ISO is raised to compensate until it hits the device's maximum.
+
+---
+
+# Stray Scanner App (upstream README)
 
 The goal of this app, is to allow easy access to raw RGB-D video datasets recorded using LiDAR enabled iOS devices. The app can be downloaded for free [on the iOS App Store](https://apps.apple.com/us/app/stray-scanner/id1557051662).
 
