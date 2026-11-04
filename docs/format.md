@@ -24,6 +24,8 @@ distortion/          (optional, present when lens distortion data is available)
 rgb.mp4
 exposure.csv         (stray-scanner-sf fork only)
 capture_settings.json (stray-scanner-sf fork only)
+frame_quality.csv    (stray-scanner-sf fork only)
+markers.csv          (stray-scanner-sf fork only, present when pins were set)
 ```
 
 `rgb.mp4` is an HEVC encoded video, which contains the recorded data from the iPhone's camera.
@@ -104,3 +106,27 @@ This fork adds two files. All files above are unchanged, so existing tools keep 
 | fps_divider | Every n-th camera frame was saved (1 = 60 fps, 2 = 30 fps, ...) |
 
 Note: with a fixed shutter the ISO is still adjusted automatically while recording (in small steps, about 5 times per second) so the brightness stays usable when you move between bright and dark areas. Use the per-frame `iso` column if you need photometric consistency.
+
+## Frame quality and markers (stray-scanner-sf fork)
+
+`frame_quality.csv` has one row per row of `odometry.csv` (same `timestamp` and `frame`), so frames can be filtered before training:
+
+| Field | Meaning |
+|---|---|
+| timestamp, frame | Same as `odometry.csv` |
+| tracking_state | `normal`, `limited` or `not_available` (ARKit tracking state) |
+| tracking_reason | For `limited`: `initializing`, `excessive_motion`, `insufficient_features`, `relocalizing` |
+| linear_speed_mps | Camera speed in m/s (smoothed) |
+| angular_speed_dps | Camera rotation speed in degrees/s (smoothed) |
+| est_blur_px | Estimated motion blur in pixels of the full-size image: (rotation speed × focal length + speed × focal length / subject distance) × exposure time. Under 1.5 px is sharp, over 3 px is visibly blurred |
+| median_depth_m | Median LiDAR depth of the central half of the image (0 = unknown, updated every 4th camera frame) |
+| depth_confident_fraction | Share of LiDAR pixels with high confidence (0–1) |
+
+`markers.csv` lists the points the user pinned with the pin button while recording, e.g. stops for a guided tour:
+
+| Field | Meaning |
+|---|---|
+| marker | 1, 2, 3, … |
+| timestamp | Time of the pin (same clock as `odometry.csv`) |
+| frame | Last saved frame number when the pin was set |
+| x, y, z, qx, qy, qz, qw | Camera pose at that moment, same convention as `odometry.csv` |
