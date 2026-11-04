@@ -9,7 +9,8 @@ phone as long as you **don't delete the app**; reinstalling over it keeps them.
 2. Open `~/Developer/stray-scanner-sf/StrayScanner.xcworkspace` in Xcode
    (the **.xcworkspace**, not the .xcodeproj).
 3. Optional, to get the latest changes: in Terminal
-   `cd ~/Developer/stray-scanner-sf && git pull`
+   `cd ~/Developer/stray-scanner-sf && git checkout -- . && git pull`
+   (`git checkout -- .` drops local edits Xcode made; your signing team is already saved in the project.)
 4. At the top of the Xcode window, set the scheme to **StrayScanner** and the destination to **your iPhone**.
 5. Press **⌘R** (Product ▸ Run). Wait for "Running StrayScanner on …"; the app opens on the phone.
 6. Stop with **⌘.** if you like; the app stays installed for another 7 days.

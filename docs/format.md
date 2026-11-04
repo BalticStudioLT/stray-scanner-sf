@@ -138,3 +138,23 @@ Note: with a fixed shutter the ISO is still adjusted automatically while recordi
 - `rgb.mp4` is written as a fragmented MP4 (1 s fragments). If the app is killed while recording (e.g. the phone overheats), the video stays playable up to the last fragment, and the CSV/PNG files are complete up to the last saved frame. On the next launch such a scan appears in the list as "Recovered scan".
 - `worldmap.arexperience` is ARKit's map of the room (`ARWorldMap`, NSKeyedArchiver), saved every 20 s and at the end. "Continue" on a scan starts a new recording that relocalizes in that map, so its `odometry.csv` poses are in the **same coordinate system** as the earlier scan. Its `capture_settings.json` then contains `"continues_scan": "<folder of the earlier scan>"` and `"relocalized_at_start"`. Start recording after the advice banner stops saying "Continuing: point at the area you scanned last".
 - `capture_settings.json` also records `"torch_mode"`: `off`, `on` or `alternate_1s`.
+
+## Ultra-wide mode (stray-scanner-sf fork, folder name starts with `uw`)
+
+ARKit only gives apps the main wide camera, so the **0.5×** button on the scan list records the ultra-wide camera
+with AVFoundation instead. There is **no LiDAR depth and no ARKit pose**: `depth/`, `confidence/` and `odometry.csv`
+are missing; align these frames with SfM, or register them to a LiDAR scan of the same room.
+
+| File | Content |
+|---|---|
+| `rgb.mp4` | Ultra-wide video, 1920×1440 @ 60 fps (or 3840×2160 @ 30 fps), HEVC, fragmented MP4, frame i = row i below |
+| `exposure.csv` | Same columns as LiDAR scans (exposure time, offset, ISO, WB gains per frame) |
+| `frame_quality.csv` | Same columns; `tracking_state` = `no_tracking`, speeds 0, `angular_speed_dps` and `est_blur_px` from the gyro |
+| `intrinsics.csv` | `timestamp, frame, fx, fy, cx, cy` per frame from the camera (pixels of the video frame) |
+| `camera_matrix.csv` | First frame's intrinsics, same layout as LiDAR scans |
+| `imu.csv` | Same format as LiDAR scans (accelerometer in g, gyro in rad/s), 400 Hz |
+| `attitude.csv` | `timestamp, qx, qy, qz, qw` CoreMotion attitude (reference frame: x arbitrary, z vertical), 100 Hz |
+| `capture_settings.json` | `"camera": "ultra_wide"`, `"lidar": false`, `"poses": false`, video size/fps, shutter |
+
+All timestamps are seconds of system uptime, the same clock as CoreMotion, so gyro samples can be matched to frames
+(e.g. for a motion-blur or rolling-shutter model).

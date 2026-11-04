@@ -24,6 +24,8 @@
 		3863FE5E25FCBB0E00C1DA4F /* InformationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 387B57C125EC065600132903 /* InformationView.swift */; };
 		3863FE5F25FCBB0E00C1DA4F /* NewSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E969CA2572608E00054CC4 /* NewSession.swift */; };
 		3863FE6225FCBB0E00C1DA4F /* RecordSessionViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38FB730E2572A9FA007D9CB0 /* RecordSessionViewController.swift */; };
+		70D1A50B2E1800000027BEEF /* UltraWideRecordViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A50A2E1800000027BEEF /* UltraWideRecordViewController.swift */; };
+		70D1A50C2E1800000027BEEF /* UltraWideRecordViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A50A2E1800000027BEEF /* UltraWideRecordViewController.swift */; };
 		3863FE6325FCBB0E00C1DA4F /* SessionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38045D572561A7370004F23C /* SessionRow.swift */; };
 		70D1A40B2E1800000027BEEF /* SplatViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A40A2E1800000027BEEF /* SplatViewer.swift */; };
 		70D1A40C2E1800000027BEEF /* SplatViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A40A2E1800000027BEEF /* SplatViewer.swift */; };
@@ -159,6 +161,7 @@
 		38C17B11259BE1DA006B3FDA /* Recording+CoreDataProperties.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Recording+CoreDataProperties.swift"; sourceTree = "<group>"; };
 		38C17B22259D1C80006B3FDA /* SessionDetail.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SessionDetail.swift; sourceTree = "<group>"; };
 		38E969CA2572608E00054CC4 /* NewSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSession.swift; sourceTree = "<group>"; };
+		70D1A50A2E1800000027BEEF /* UltraWideRecordViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UltraWideRecordViewController.swift; sourceTree = "<group>"; };
 		38FB730E2572A9FA007D9CB0 /* RecordSessionViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordSessionViewController.swift; sourceTree = "<group>"; };
 		38FB73152572AF63007D9CB0 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		38FB731F2573EABB007D9CB0 /* ShaderTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderTypes.h; sourceTree = "<group>"; };
@@ -349,6 +352,7 @@
 			isa = PBXGroup;
 			children = (
 				38FB730E2572A9FA007D9CB0 /* RecordSessionViewController.swift */,
+				70D1A50A2E1800000027BEEF /* UltraWideRecordViewController.swift */,
 			);
 			path = Controllers;
 			sourceTree = "<group>";
@@ -557,6 +561,7 @@
 				38E969CB2572608E00054CC4 /* NewSession.swift in Sources */,
 				3807420F27BBCF2D003194C1 /* lodepng.cpp in Sources */,
 				38FB730F2572A9FA007D9CB0 /* RecordSessionViewController.swift in Sources */,
+				70D1A50B2E1800000027BEEF /* UltraWideRecordViewController.swift in Sources */,
 				38694C7E26D2C66F00546EA1 /* OdometryEncoder.swift in Sources */,
 				38694C7826D2C66F00546EA1 /* VideoEncoder.swift in Sources */,
 				38045D582561A7370004F23C /* SessionRow.swift in Sources */,
@@ -602,6 +607,7 @@
 				3863FE5F25FCBB0E00C1DA4F /* NewSession.swift in Sources */,
 				3807421127BBD77B003194C1 /* lodepng.cpp in Sources */,
 				3863FE6225FCBB0E00C1DA4F /* RecordSessionViewController.swift in Sources */,
+				70D1A50C2E1800000027BEEF /* UltraWideRecordViewController.swift in Sources */,
 				38694C7F26D2C66F00546EA1 /* OdometryEncoder.swift in Sources */,
 				38694C7926D2C66F00546EA1 /* VideoEncoder.swift in Sources */,
 				3863FE6325FCBB0E00C1DA4F /* SessionRow.swift in Sources */,

@@ -77,6 +77,11 @@ final class ExposureController {
     private let isoDeadband: Float = 0.15
     private let isoGain: Float = 0.5
 
+    /// Controls any capture device (e.g. the ultra-wide camera in the non-ARKit mode).
+    init(device: AVCaptureDevice?) {
+        self.device = device
+    }
+
     init() {
         self.device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera
         if device == nil {

@@ -80,14 +80,23 @@ struct SessionList: View {
                     .scrollContentBackground(.hidden)
                 }
 
-                NavigationLink(destination: NewSessionView()) {
-                    Label("New scan", systemImage: "record.circle")
-                        .font(.title3.weight(.semibold))
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 8)
+                HStack(spacing: 12) {
+                    NavigationLink(destination: NewSessionView()) {
+                        Label("New scan", systemImage: "record.circle")
+                            .font(.title3.weight(.semibold))
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 8)
+                    }
+                    .glassButton(prominent: true)
+                    .tint(.red)
+                    NavigationLink(destination: UltraWideSessionView()) {
+                        Label("0.5×", systemImage: "camera.aperture")
+                            .font(.title3.weight(.semibold))
+                            .padding(.vertical, 8)
+                    }
+                    .glassButton()
+                    .accessibilityLabel("Ultra-wide video, no LiDAR")
                 }
-                .glassButton(prominent: true)
-                .tint(.red)
                 .padding(.bottom, 20)
             }
             .navigationTitle("Scans")
