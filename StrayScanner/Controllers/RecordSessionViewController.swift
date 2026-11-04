@@ -71,7 +71,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var viewMode: ViewMode = .camera
     private var lastFrame: ARFrame?
     private var savedBrightness: CGFloat?
-    private var statsExpanded = true
+    private var statsExpanded = UserDefaults.standard.bool(forKey: "StatsExpanded")
+    private var hintHideWork: DispatchWorkItem?
     private var lastAdvice: ScanAdvice?
     private var lastHaptic = Date.distantPast
     private var datasetBytes: Int64 = 0
@@ -108,6 +109,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private let depthInset = MetalPreviewView()
     private let minimapInset = MetalPreviewView()
     private let insetStack = UIStackView()
+    /// What each small view shows; tapping one swaps it with the big view.
+    private var insetModes: [ViewMode] = [.camera, .depth, .map]
+    private var configuredInsetLayers = Set<ObjectIdentifier>()
     private let statsPanel = Glass.panel(cornerRadius: 20)
     private let statsLabel = UILabel()
     private let coverageRing = CoverageRingView()
@@ -242,20 +246,40 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
         // Small views (camera, LiDAR, minimap), shown from the views menu.
         insetStack.translatesAutoresizingMaskIntoConstraints = false
-        insetStack.axis = .vertical
-        insetStack.spacing = 8
-        insetStack.alignment = .trailing
-        for (inset, name) in [(cameraInset, "Camera"), (depthInset, "LiDAR depth"), (minimapInset, "Minimap")] {
+        insetStack.axis = .horizontal
+        insetStack.spacing = 6
+        insetStack.alignment = .bottom
+        for (index, inset) in [cameraInset, depthInset, minimapInset].enumerated() {
             inset.translatesAutoresizingMaskIntoConstraints = false
-            inset.layer.cornerRadius = 14
+            inset.layer.cornerRadius = 16
             inset.layer.cornerCurve = .continuous
             inset.layer.borderWidth = 1
-            inset.layer.borderColor = UIColor(white: 1, alpha: 0.35).cgColor
+            inset.layer.borderColor = UIColor(white: 1, alpha: 0.3).cgColor
             inset.clipsToBounds = true
             inset.isHidden = true
-            inset.accessibilityLabel = name
+            inset.tag = 600 + index
+            inset.isAccessibilityElement = true
+            inset.accessibilityTraits = .button
+            inset.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(insetTapped(_:))))
+            let caption = UILabel()
+            caption.translatesAutoresizingMaskIntoConstraints = false
+            caption.tag = 700
+            caption.font = UIFont.systemFont(ofSize: 10, weight: .semibold)
+            caption.textColor = .white
+            caption.backgroundColor = UIColor(white: 0, alpha: 0.45)
+            caption.layer.cornerRadius = 6
+            caption.layer.masksToBounds = true
+            caption.textAlignment = .center
+            inset.addSubview(caption)
+            NSLayoutConstraint.activate([
+                caption.bottomAnchor.constraint(equalTo: inset.bottomAnchor, constant: -5),
+                caption.centerXAnchor.constraint(equalTo: inset.centerXAnchor),
+                caption.heightAnchor.constraint(equalToConstant: 16),
+                caption.widthAnchor.constraint(greaterThanOrEqualToConstant: 40),
+            ])
             insetStack.addArrangedSubview(inset)
         }
+        updateInsetCaptions()
 
         // Stats card with direction ring.
         statsLabel.numberOfLines = 0
@@ -273,8 +297,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         adviceIcon.contentMode = .scaleAspectFit
         adviceLabel.translatesAutoresizingMaskIntoConstraints = false
         adviceLabel.textColor = .white
-        adviceLabel.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
-        adviceLabel.numberOfLines = 2
+        adviceLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        adviceLabel.numberOfLines = 1
         adviceLabel.adjustsFontSizeToFitWidth = true
         adviceLabel.minimumScaleFactor = 0.8
         blurMeter.translatesAutoresizingMaskIntoConstraints = false
@@ -288,6 +312,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         pinButton.accessibilityLabel = "Pin this spot"
         pinButton.addTarget(self, action: #selector(pinTapped), for: .touchUpInside)
         pinButton.isEnabled = false
+        pinButton.isHidden = true
 
         pointHintLabel.translatesAutoresizingMaskIntoConstraints = false
         pointHintLabel.text = "Tap to switch view"
@@ -296,10 +321,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         pointHintLabel.isHidden = true
 
         // Bottom dock: view modes, fps, record, shutter.
-        for mode in ViewMode.allCases {
+        for (index, mode) in ViewMode.displayOrder.enumerated() {
             let image = UIImage(systemName: mode.symbolName)
             image?.accessibilityLabel = mode.title
-            modeControl.insertSegment(with: image, at: mode.rawValue, animated: false)
+            modeControl.insertSegment(with: image, at: index, animated: false)
         }
         modeControl.translatesAutoresizingMaskIntoConstraints = false
         modeControl.selectedSegmentTintColor = UIColor(white: 1, alpha: 0.3)
@@ -355,14 +380,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             timerPanel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             timerPanel.heightAnchor.constraint(equalToConstant: 36),
 
+            // Small views sit in one row just above the advice banner, out of the way of the stats.
             insetStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            insetStack.topAnchor.constraint(equalTo: statsPanel.bottomAnchor, constant: 8),
-            cameraInset.widthAnchor.constraint(equalToConstant: 96),
-            cameraInset.heightAnchor.constraint(equalToConstant: 128),
-            depthInset.widthAnchor.constraint(equalToConstant: 96),
-            depthInset.heightAnchor.constraint(equalToConstant: 128),
-            minimapInset.widthAnchor.constraint(equalToConstant: 128),
-            minimapInset.heightAnchor.constraint(equalToConstant: 128),
+            insetStack.bottomAnchor.constraint(equalTo: advicePanel.topAnchor, constant: -8),
+            cameraInset.widthAnchor.constraint(equalToConstant: 72),
+            cameraInset.heightAnchor.constraint(equalToConstant: 96),
+            depthInset.widthAnchor.constraint(equalToConstant: 72),
+            depthInset.heightAnchor.constraint(equalToConstant: 96),
+            minimapInset.widthAnchor.constraint(equalToConstant: 72),
+            minimapInset.heightAnchor.constraint(equalToConstant: 96),
 
             statsPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             statsPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
@@ -386,19 +412,19 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             adviceIcon.heightAnchor.constraint(equalToConstant: 22),
             adviceLabel.leadingAnchor.constraint(equalTo: adviceIcon.trailingAnchor, constant: 10),
             adviceLabel.trailingAnchor.constraint(equalTo: advicePanel.contentView.trailingAnchor, constant: -14),
-            adviceLabel.topAnchor.constraint(equalTo: advicePanel.contentView.topAnchor, constant: 10),
+            adviceLabel.topAnchor.constraint(equalTo: advicePanel.contentView.topAnchor, constant: 8),
             blurMeter.leadingAnchor.constraint(equalTo: adviceLabel.leadingAnchor),
             blurMeter.trailingAnchor.constraint(equalTo: adviceLabel.trailingAnchor),
-            blurMeter.topAnchor.constraint(equalTo: adviceLabel.bottomAnchor, constant: 6),
-            blurMeter.heightAnchor.constraint(equalToConstant: 4),
-            blurMeter.bottomAnchor.constraint(equalTo: advicePanel.contentView.bottomAnchor, constant: -10),
+            blurMeter.topAnchor.constraint(equalTo: adviceLabel.bottomAnchor, constant: 5),
+            blurMeter.heightAnchor.constraint(equalToConstant: 3),
+            blurMeter.bottomAnchor.constraint(equalTo: advicePanel.contentView.bottomAnchor, constant: -8),
 
             pinButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             pinButton.centerYAnchor.constraint(equalTo: advicePanel.centerYAnchor),
-            pinButton.widthAnchor.constraint(equalToConstant: 52),
-            pinButton.heightAnchor.constraint(equalToConstant: 52),
+            pinButton.widthAnchor.constraint(equalToConstant: 46),
+            pinButton.heightAnchor.constraint(equalToConstant: 46),
 
-            pointHintLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            pointHintLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             pointHintLabel.bottomAnchor.constraint(equalTo: advicePanel.topAnchor, constant: -6),
 
             dockPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
@@ -529,6 +555,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         fpsButton.isEnabled = false
         closeButton.isEnabled = false
         pinButton.isEnabled = true
+        pinButton.isHidden = false
         timerDot.backgroundColor = .systemRed
         datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting], exposureController: exposureController)
         var settings = exposureController.captureSettings()
@@ -567,6 +594,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         fpsButton.isEnabled = true
         closeButton.isEnabled = true
         pinButton.isEnabled = false
+        pinButton.isHidden = true
         timerDot.backgroundColor = UIColor(white: 1, alpha: 0.5)
         if let encoder = datasetEncoder {
             switch encoder.status {
@@ -639,29 +667,33 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guard viewMode == .pointCloud, let renderer = renderer else { return }
         renderer.chaseCamera.toggle()
         pointHintLabel.text = renderer.chaseCamera ? "Overview · tap for camera view" : "Camera view · tap for overview"
+        flashHint()
     }
 
     @objc private func statsTapped() {
         statsExpanded.toggle()
+        UserDefaults.standard.set(statsExpanded, forKey: "StatsExpanded")
         updateStatsText()
     }
 
     @objc private func modeChanged() {
-        if let mode = ViewMode(rawValue: modeControl.selectedSegmentIndex) {
-            setViewMode(mode, save: true)
+        let index = modeControl.selectedSegmentIndex
+        if index >= 0 && index < ViewMode.displayOrder.count {
+            setViewMode(ViewMode.displayOrder[index], save: true)
         }
     }
 
     private func setViewMode(_ mode: ViewMode, save: Bool) {
         viewMode = mode
         renderer?.mode = mode
-        modeControl.selectedSegmentIndex = mode.rawValue
+        modeControl.selectedSegmentIndex = ViewMode.displayOrder.firstIndex(of: mode) ?? 0
         if let title = view.viewWithTag(501) as? UILabel {
             title.text = mode == .dim ? "Dim · screen off to save battery" : mode.title
         }
-        pointHintLabel.isHidden = mode != .pointCloud
+        pointHintLabel.isHidden = true
         if mode == .pointCloud, let renderer = renderer {
             pointHintLabel.text = renderer.chaseCamera ? "Overview · tap for camera view" : "Camera view · tap for overview"
+            flashHint()
         }
         if mode == .dim {
             let screen = view.window?.windowScene?.screen
@@ -675,6 +707,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             dockPanel.alpha = 1
         }
         if save { mode.save() }
+    }
+
+    private func flashHint() {
+        hintHideWork?.cancel()
+        pointHintLabel.isHidden = false
+        let work = DispatchWorkItem { [weak self] in self?.pointHintLabel.isHidden = true }
+        hintHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
     }
 
     private func restoreBrightness() {
@@ -979,14 +1019,43 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         cameraInset.isHidden = !defaults.bool(forKey: "InsetCamera")
         depthInset.isHidden = !defaults.bool(forKey: "InsetDepth")
         minimapInset.isHidden = !defaults.bool(forKey: "InsetMinimap")
-        if let renderer = renderer {
-            if renderer.cameraInsetLayer == nil && !cameraInset.isHidden { configureInsetLayer(cameraInset.metalLayer, renderer: renderer) }
-            if renderer.depthInsetLayer == nil && !depthInset.isHidden { configureInsetLayer(depthInset.metalLayer, renderer: renderer) }
-            if renderer.minimapLayer == nil && !minimapInset.isHidden { configureInsetLayer(minimapInset.metalLayer, renderer: renderer) }
-            renderer.cameraInsetLayer = cameraInset.isHidden ? nil : cameraInset.metalLayer
-            renderer.depthInsetLayer = depthInset.isHidden ? nil : depthInset.metalLayer
-            renderer.minimapLayer = minimapInset.isHidden ? nil : minimapInset.metalLayer
+        updateRendererInsets()
+    }
+
+    private func updateRendererInsets() {
+        guard let renderer = renderer else { return }
+        var list: [(layer: CAMetalLayer, mode: ViewMode)] = []
+        for (index, inset) in [cameraInset, depthInset, minimapInset].enumerated() where !inset.isHidden {
+            let id = ObjectIdentifier(inset.metalLayer)
+            if !configuredInsetLayers.contains(id) {
+                configureInsetLayer(inset.metalLayer, renderer: renderer)
+                configuredInsetLayers.insert(id)
+            }
+            list.append((inset.metalLayer, insetModes[index]))
         }
+        renderer.insets = list
+    }
+
+    private func updateInsetCaptions() {
+        for (index, inset) in [cameraInset, depthInset, minimapInset].enumerated() {
+            let title = insetModes[index].title
+            (inset.viewWithTag(700) as? UILabel)?.text = "  \(title)  "
+            inset.accessibilityLabel = "\(title), tap to show big"
+        }
+    }
+
+    /// Tapping a small view swaps it with the big view.
+    @objc private func insetTapped(_ gesture: UITapGestureRecognizer) {
+        guard let inset = gesture.view, viewMode != .dim else { return }
+        let index = inset.tag - 600
+        guard index >= 0 && index < insetModes.count else { return }
+        let small = insetModes[index]
+        insetModes[index] = viewMode
+        UIView.transition(with: view, duration: 0.25, options: .transitionCrossDissolve, animations: {
+            self.setViewMode(small, save: true)
+            self.updateInsetCaptions()
+            self.updateRendererInsets()
+        })
     }
 
     private func configureInsetLayer(_ layer: CAMetalLayer, renderer: ScanRenderer) {
@@ -1013,8 +1082,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let blur = String(format: "Blur %.1f px · turn %.0f°/s (max %.0f)", m.blurPixels, m.angularSpeedDegrees, m.maxAngularSpeedForSharpFrames)
         let distance = m.medianDepth > 0 ? String(format: "%.1f m", m.medianDepth) : "–"
         let motion = String(format: "Subject %@ · walk %.2f m/s · moved %.1f m", distance, m.linearSpeed, m.distanceTravelled)
+        if !statsExpanded {
+            // Compact: the two lines that matter while walking; tap the card for everything.
+            let frames = datasetEncoder.map { " · \($0.savedFrameCount) fr" } ?? ""
+            let cloud = renderer?.pointCloud
+            let cover = String(format: " · %.0f m² · %.0f%% 3+ sides", cloud?.surfaceArea ?? 0, (cloud?.wellCoveredFraction ?? 0) * 100)
+            statsLabel.text = String(format: "%@ · blur %.1f px", exposure, m.blurPixels) + "\n"
+                + String(format: "%.1f m away · moved %.1f m", m.medianDepth, m.distanceTravelled) + frames + cover
+            return
+        }
         var lines = [exposure, blur, motion]
-        if statsExpanded {
+        do {
             let frames = datasetEncoder.map { "Frames \($0.savedFrameCount) · dropped \($0.droppedFrames) · pins \($0.markerCount)" } ?? "Not recording"
             let cloud = renderer?.pointCloud
             let surface = String(format: "Scanned ≈ %.0f m² · %.0f%% seen from 3+ sides · LiDAR %.0f%%",

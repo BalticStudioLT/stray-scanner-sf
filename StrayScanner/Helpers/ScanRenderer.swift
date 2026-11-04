@@ -17,6 +17,10 @@ enum ViewMode: Int, CaseIterable {
     case overlay = 2
     case pointCloud = 3
     case dim = 4
+    case map = 5
+
+    /// Order of the view picker (map before dim).
+    static let displayOrder: [ViewMode] = [.camera, .depth, .overlay, .pointCloud, .map, .dim]
 
     static let userDefaultsKey = "ViewMode"
 
@@ -27,6 +31,7 @@ enum ViewMode: Int, CaseIterable {
         case .overlay: return "Mix"
         case .pointCloud: return "Points"
         case .dim: return "Dim"
+        case .map: return "Map"
         }
     }
 
@@ -37,6 +42,7 @@ enum ViewMode: Int, CaseIterable {
         case .overlay: return "square.on.square"
         case .pointCloud: return "circle.grid.3x3.fill"
         case .dim: return "moon.fill"
+        case .map: return "map.fill"
         }
     }
 
@@ -91,10 +97,8 @@ final class ScanRenderer {
     var showCoverage: Bool = false
     /// Hide points more than this far above the phone in the overview and minimap (cuts the ceiling away).
     var ceilingCut: Float = 0.3
-    /// Small extra views; nil = hidden.
-    var cameraInsetLayer: CAMetalLayer?
-    var depthInsetLayer: CAMetalLayer?
-    var minimapLayer: CAMetalLayer?
+    /// Small extra views (picture-in-picture), each showing one view mode.
+    var insets: [(layer: CAMetalLayer, mode: ViewMode)] = []
     /// Path-guide stripes to draw (world space).
     var guideVertices: [PointCloudVertex] = []
     /// Lighter rendering when the phone is hot.
@@ -212,24 +216,20 @@ final class ScanRenderer {
         } else {
             clearedForDim = false
             if layer.drawableSize.width > 0, let drawable = layer.nextDrawable() {
-                encodeMain(commandBuffer, drawable: drawable, frame: frame, textures: textures)
+                encode(mode: mode, commandBuffer, drawable: drawable, frame: frame, textures: textures,
+                       size: layer.drawableSize, isInset: false)
                 drawables.append(drawable)
             }
         }
 
         // Small views refresh at half the preview rate.
         if (frameNumber / max(interval, 1)) % 2 == 0 {
-            if let inset = cameraInsetLayer, let drawable = inset.nextDrawable() {
-                encodeQuad(commandBuffer, drawable: drawable, pipeline: cameraPipeline, textures: textures, needsCamera: true, needsDepth: false)
-                drawables.append(drawable)
-            }
-            if let inset = depthInsetLayer, let drawable = inset.nextDrawable() {
-                encodeQuad(commandBuffer, drawable: drawable, pipeline: depthPipeline, textures: textures, needsCamera: false, needsDepth: true)
-                drawables.append(drawable)
-            }
-            if let minimap = minimapLayer, let drawable = minimap.nextDrawable() {
-                encodeMinimap(commandBuffer, drawable: drawable, frame: frame, size: minimap.drawableSize)
-                drawables.append(drawable)
+            for inset in insets where inset.mode != .dim {
+                if inset.layer.drawableSize.width > 0, let drawable = inset.layer.nextDrawable() {
+                    encode(mode: inset.mode, commandBuffer, drawable: drawable, frame: frame, textures: textures,
+                           size: inset.layer.drawableSize, isInset: true)
+                    drawables.append(drawable)
+                }
             }
         }
 
@@ -283,8 +283,8 @@ final class ScanRenderer {
         return pass
     }
 
-    private func encodeMain(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable, frame: ARFrame, textures: FrameTextures) {
-        let size = layer.drawableSize
+    private func encode(mode: ViewMode, _ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable, frame: ARFrame,
+                        textures: FrameTextures, size: CGSize, isInset: Bool) {
         switch mode {
         case .camera, .overlay, .depth:
             let pipeline = mode == .camera ? cameraPipeline : (mode == .overlay ? overlayPipeline : depthPipeline)
@@ -295,7 +295,7 @@ final class ScanRenderer {
                 drawQuad(encoder)
             }
             // Path-guide stripes over the live picture.
-            if !guideVertices.isEmpty && mode != .depth {
+            if !guideVertices.isEmpty && mode != .depth && !isInset {
                 let view = frame.camera.viewMatrix(for: .portrait)
                 let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: size, zNear: 0.02, zFar: 50)
                 var uniforms = PointCloudUniforms(viewProjection: projection * view,
@@ -308,22 +308,13 @@ final class ScanRenderer {
         case .pointCloud:
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: colorPass(drawable, withDepth: true)) else { return }
             encoder.setCullMode(.none)
-            drawPointCloud(encoder, frame: frame, drawableSize: size)
+            drawPointCloud(encoder, frame: frame, drawableSize: size, chase: isInset ? true : chaseCamera)
             encoder.endEncoding()
+        case .map:
+            encodeMinimap(commandBuffer, drawable: drawable, frame: frame, size: size)
         case .dim:
             break
         }
-    }
-
-    private func encodeQuad(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable, pipeline: MTLRenderPipelineState,
-                            textures: FrameTextures, needsCamera: Bool, needsDepth: Bool) {
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: colorPass(drawable, withDepth: false)) else { return }
-        encoder.setCullMode(.none)
-        if bindQuadTextures(encoder, textures: textures, needsCamera: needsCamera, needsDepth: needsDepth) {
-            encoder.setRenderPipelineState(pipeline)
-            drawQuad(encoder)
-        }
-        encoder.endEncoding()
     }
 
     private func encodeClear(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable) {
@@ -342,7 +333,7 @@ final class ScanRenderer {
         var flat = SIMD3<Float>(forward.x, 0, forward.z)
         flat = simd_length(flat) > 0.05 ? simd_normalize(flat) : SIMD3<Float>(0, 0, -1)
         let view = ScanRenderer.lookAt(eye: position + SIMD3<Float>(0, 10, 0), target: position, up: flat)
-        let halfSize: Float = 3.5
+        let halfSize: Float = size.height > 600 ? 5 : 3.5
         let aspect = Float(size.width / max(size.height, 1))
         let projection = ScanRenderer.orthographic(halfWidth: halfSize * aspect, halfHeight: halfSize, near: 0.1, far: 30)
         var uniforms = PointCloudUniforms(viewProjection: projection * view,
@@ -417,14 +408,14 @@ final class ScanRenderer {
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
     }
 
-    private func drawPointCloud(_ encoder: MTLRenderCommandEncoder, frame: ARFrame, drawableSize: CGSize) {
+    private func drawPointCloud(_ encoder: MTLRenderCommandEncoder, frame: ARFrame, drawableSize: CGSize, chase: Bool) {
         let aspect = Float(drawableSize.width / max(drawableSize.height, 1))
         let projection: simd_float4x4
         let view: simd_float4x4
         let t = frame.camera.transform
         let position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         var clipY = Float.greatestFiniteMagnitude
-        if chaseCamera {
+        if chase {
             let forward = -simd_normalize(SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z))
             var flat = SIMD3<Float>(forward.x, 0, forward.z)
             flat = simd_length(flat) > 0.05 ? simd_normalize(flat) : SIMD3<Float>(0, 0, -1)
@@ -447,7 +438,7 @@ final class ScanRenderer {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 1)
         drawCloud(encoder)
         drawGuides(encoder)
-        if chaseCamera {
+        if chase {
             var marker = PointCloudVertex(position: SIMD4<Float>(position.x, position.y, position.z, 0.08),
                                           color: SIMD4<Float>(1, 1, 1, 1))
             encoder.setVertexBytes(&marker, length: MemoryLayout<PointCloudVertex>.stride, index: 0)

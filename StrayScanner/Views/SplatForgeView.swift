@@ -9,6 +9,7 @@
 
 import SwiftUI
 import WebKit
+import UniformTypeIdentifiers
 
 final class SplatForgeClient: ObservableObject {
     @Published var system: [String: Any] = [:]
@@ -116,6 +117,8 @@ struct SplatForgeView: View {
     @StateObject private var client = SplatForgeClient()
     @State private var showingSettings = false
     @State private var showingStudio = false
+    @State private var viewerSource: SplatSource?
+    @State private var showingImporter = false
 
     var body: some View {
         List {
@@ -145,6 +148,14 @@ struct SplatForgeView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    showingImporter = true
+                } label: {
+                    Image(systemName: "cube.transparent")
+                }
+                .accessibilityLabel("Open a splat file")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
                     showingSettings = true
                 } label: {
                     Image(systemName: "gearshape")
@@ -158,6 +169,13 @@ struct SplatForgeView: View {
         }
         .fullScreenCover(isPresented: $showingStudio) {
             StudioWebScreen(url: client.studioURL)
+        }
+        .fullScreenCover(item: $viewerSource) { source in
+            SplatViewerScreen(source: source)
+        }
+        .fileImporter(isPresented: $showingImporter,
+                      allowedContentTypes: [UTType(filenameExtension: "ply") ?? .data]) { result in
+            if case .success(let url) = result { viewerSource = .file(url) }
         }
         .onAppear { client.start() }
         .onDisappear { client.stop() }
@@ -277,12 +295,25 @@ struct SplatForgeView: View {
                     let best = runs.compactMap { number($0["psnr"]) }.max()
                     DisclosureGroup {
                         ForEach(Array(runs.reversed().prefix(12).enumerated()), id: \.offset) { _, run in
-                            HStack {
-                                Text((run["name"] as? String) ?? "").font(.caption.monospaced()).lineLimit(1)
-                                Spacer()
-                                if let psnr = number(run["psnr"]) { Text(String(format: "%.2f dB", psnr)).font(.caption.monospacedDigit()) }
-                                if let splats = number(run["splats"]) { Text(String(format: "%.1fM", splats / 1e6)).font(.caption2).foregroundStyle(.secondary) }
+                            let plys = (run["plys"] as? [String]) ?? []
+                            let ply = plys.first(where: { $0.hasSuffix("splat.ply") }) ?? plys.last
+                            let name = (run["name"] as? String) ?? ""
+                            Button {
+                                if let ply = ply {
+                                    viewerSource = .studio(ply: ply, title: "\((project["name"] as? String) ?? "") · \(name)")
+                                }
+                            } label: {
+                                HStack {
+                                    Image(systemName: ply == nil ? "hourglass" : "cube.fill")
+                                        .foregroundStyle(ply == nil ? Color.secondary : Color.accentColor)
+                                    Text(name).font(.caption.monospaced()).lineLimit(1)
+                                    Spacer()
+                                    if let psnr = number(run["psnr"]) { Text(String(format: "%.2f dB", psnr)).font(.caption.monospacedDigit()) }
+                                    if let splats = number(run["splats"]) { Text(String(format: "%.1fM", splats / 1e6)).font(.caption2).foregroundStyle(.secondary) }
+                                }
                             }
+                            .disabled(ply == nil)
+                            .accessibilityLabel("View \(name) in 3D or AR")
                         }
                     } label: {
                         HStack {

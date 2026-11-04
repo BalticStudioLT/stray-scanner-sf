@@ -13,3 +13,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - "also button for flash, continuous or every second shot so we could get two different light setups for room."
 - 2026-11-05 01:16 "build 4k and tailscale. also other stuff. send leave note for other ai working on splat forge. it will implement it. you later check for its responses (1 hour intervals). you have all night. i am going to sleep. check what else could be useful and possible. optimize app itself so it doesnt draw too much power. think how we can get ultrawide view. maybe separately run it."
 - 2026-11-05 01:26 "Flashlight could have lower iso. Because otherwise it will burn out the view. So in beginning there should be calibration"
+- 2026-11-05 01:37 [screenshot, Points view with camera+LiDAR+minimap insets, coverage colours] "When everything is on it becomes crowded"
+- 2026-11-05 01:39 "Make view more modern, clicking some view swaps it with big screen"

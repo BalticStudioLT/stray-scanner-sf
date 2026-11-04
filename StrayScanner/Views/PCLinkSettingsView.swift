@@ -14,6 +14,7 @@ struct PCLinkSettingsView: View {
     @State private var token: String = ""
     @State private var autoUpload = false
     @State private var live = false
+    @State private var draft = UserDefaults.standard.bool(forKey: "PCLinkDraft")
     @State private var testResult: String?
     @State private var testing = false
 
@@ -21,7 +22,7 @@ struct PCLinkSettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("PC address, e.g. coolmaster or 100.x.y.z", text: $host)
+                    TextField("PC address, e.g. coolmaster4 or 100.72.101.23", text: $host)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
@@ -54,6 +55,7 @@ struct PCLinkSettingsView: View {
                 }
                 Section {
                     Toggle("Send each scan to the PC when recording stops", isOn: $autoUpload)
+                    Toggle("Quick draft training (~4 min instead of ~10)", isOn: $draft)
                     Toggle("Live link while scanning (coverage and hints from the PC)", isOn: $live)
                 } footer: {
                     Text("The live link sends the camera position 5×/s, new points 2×/s and a small preview image 1×/s. It uses some battery; turn it off when the PC is not running.")
@@ -84,6 +86,7 @@ struct PCLinkSettingsView: View {
     }
 
     private func save() {
+        UserDefaults.standard.set(draft, forKey: "PCLinkDraft")
         PCLinkSettings(host: host, port: Int(port) ?? 8777, token: token, autoUpload: autoUpload, live: live).save()
     }
 }

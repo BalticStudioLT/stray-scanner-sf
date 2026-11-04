@@ -44,7 +44,7 @@ final class PointCloudAccumulator {
     private let pointSize: Float = 0.009
     private let fineVoxelSize: Float = 0.02
     private let areaVoxelSize: Float = 0.10
-    private let pixelStride: Int = 3
+    private let pixelStride: Int = 4 // 64×48 samples per depth map; 3 doubled CPU for little visible gain
     private let maxDepth: Float = 5.0
 
     init?(device: MTLDevice, capacity: Int = 1_200_000) {

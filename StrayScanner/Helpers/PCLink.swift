@@ -6,9 +6,10 @@
 //  The phone runs the normal Tailscale app; this code only talks HTTP / WebSocket to the PC's
 //  address. Protocol: docs/pc-link.md.
 //
-//  - Upload: POST http://<host>:<port>/stray/upload (zip of the scan folder)
-//  - Ping:   GET  http://<host>:<port>/stray/ping
-//  - Live:   ws://<host>:<port>/stray/live (poses, new points, small JPEG previews out; hints back)
+//  - Upload: POST http://<host>:<port>/api/scan/upload?name=<scan>&recipe=base|draft (zip of the scan folder),
+//            then GET /api/scan/state?name=… and /api/scan/status?job=… until the splat is trained
+//  - Status: GET  http://<host>:<port>/api/system
+//  - Live:   ws://<host>:<port + 1>/stray/live (poses, new points, small JPEG previews out; hints back)
 //
 
 import Foundation
@@ -33,7 +34,7 @@ struct PCLinkSettings {
     static func load() -> PCLinkSettings {
         let d = UserDefaults.standard
         let port = d.integer(forKey: portKey)
-        return PCLinkSettings(host: d.string(forKey: hostKey) ?? "",
+        return PCLinkSettings(host: d.string(forKey: hostKey) ?? "coolmaster4",
                               port: port > 0 ? port : 8777,
                               token: d.string(forKey: tokenKey) ?? "",
                               autoUpload: d.bool(forKey: autoUploadKey),
@@ -51,12 +52,15 @@ struct PCLinkSettings {
 
     var isConfigured: Bool { return !host.trimmingCharacters(in: .whitespaces).isEmpty }
 
-    func url(_ path: String, scheme: String = "http") -> URL? {
+    func url(_ path: String, scheme: String = "http", query: [String: String] = [:]) -> URL? {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host.trimmingCharacters(in: .whitespaces)
         components.port = port
         components.path = path
+        if !query.isEmpty {
+            components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
         return components.url
     }
 }
@@ -106,7 +110,8 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
     func upload(directory: URL) {
         let settings = PCLinkSettings.load()
         let name = directory.lastPathComponent
-        guard settings.isConfigured, let url = settings.url("/stray/upload") else {
+        let recipe = UserDefaults.standard.bool(forKey: "PCLinkDraft") ? "draft" : "base"
+        guard settings.isConfigured, let url = settings.url("/api/scan/upload", query: ["name": name, "recipe": recipe]) else {
             report(name, nil, "Set the PC address first (Scans ▸ PC link)")
             return
         }
@@ -134,10 +139,11 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
                     if let error = error {
                         self.report(name, nil, "Upload failed: \(error.localizedDescription)")
                     } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                        let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                        self.report(name, nil, "Sent to PC" + (text.isEmpty ? "" : " — \(text.prefix(100))"))
+                        self.report(name, nil, "Sent to PC — preparing frames…")
+                        self.follow(scan: name, settings: settings, attempt: 0)
                     } else {
-                        self.report(name, nil, "PC answered \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                        let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                        self.report(name, nil, "PC answered \((response as? HTTPURLResponse)?.statusCode ?? 0) \(text.prefix(120))")
                     }
                 }
                 self.lock.lock()
@@ -151,6 +157,47 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
                 self.lock.unlock()
                 self.report(name, nil, "Could not pack the scan: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Follows the PC's processing: /api/scan/state until a job exists, then /api/scan/status until it is done.
+    private func follow(scan: String, settings: PCLinkSettings, attempt: Int, job: Int? = nil) {
+        guard attempt < 2000 else { return } // ~3 h at 5 s
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+            let url = job.map { settings.url("/api/scan/status", query: ["job": String($0)]) }
+                ?? settings.url("/api/scan/state", query: ["name": scan])
+            guard let requestURL = url else { return }
+            var request = URLRequest(url: requestURL, timeoutInterval: 15)
+            request.setValue(settings.token, forHTTPHeaderField: "X-Token")
+            URLSession.shared.dataTask(with: request) { data, _, _ in
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                let text = (json["text"] as? String) ?? ""
+                if let job = job {
+                    let status = (json["status"] as? String) ?? ""
+                    let progress = (json["progress"] as? Double) ?? (json["progress"] as? NSNumber)?.doubleValue
+                    if status == "done" {
+                        let result = json["result"] as? [String: Any] ?? [:]
+                        let psnr = (result["psnr"] as? Double).map { String(format: " · PSNR %.1f", $0) } ?? ""
+                        self.report(scan, nil, "Splat ready on the PC" + psnr + " — open SplatForge to view it")
+                        return
+                    }
+                    if status == "failed" {
+                        self.report(scan, nil, "PC training failed: \(text.prefix(120))")
+                        return
+                    }
+                    self.report(scan, progress ?? 0, text.isEmpty ? "PC: \(status)" : "PC: \(text)")
+                    self.follow(scan: scan, settings: settings, attempt: attempt + 1, job: job)
+                } else {
+                    let stage = (json["stage"] as? String) ?? ""
+                    if stage == "failed" {
+                        self.report(scan, nil, "PC could not use the scan: \(text.prefix(150))")
+                        return
+                    }
+                    let nextJob = (json["job"] as? Int) ?? (json["job"] as? NSNumber)?.intValue
+                    self.report(scan, nil, text.isEmpty ? "PC: \(stage)" : "PC: \(text)")
+                    self.follow(scan: scan, settings: settings, attempt: attempt + 1, job: nextJob)
+                }
+            }.resume()
         }
     }
 
@@ -203,7 +250,10 @@ final class PCLiveLink {
     }
 
     func connect(scanName: String?, frame: ARFrame?) {
-        guard let url = settings.url("/stray/live", scheme: "ws") else { return }
+        // Python's http.server (Studio, port 8777) cannot do WebSockets: the live link listens on the next port.
+        var liveSettings = settings
+        liveSettings.port = settings.port + 1
+        guard let url = liveSettings.url("/stray/live", scheme: "ws") else { return }
         var request = URLRequest(url: url)
         request.setValue(settings.token, forHTTPHeaderField: "X-Token")
         let task = URLSession.shared.webSocketTask(with: request)

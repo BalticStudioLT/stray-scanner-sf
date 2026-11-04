@@ -174,3 +174,77 @@ fragment half4 pointCloudFragment(SFPointOut in [[stage_in]],
     }
     return half4(in.color);
 }
+
+// MARK: - stray-scanner-sf: Gaussian splat viewer (own implementation, standard 3DGS EWA projection)
+
+struct GSplat {
+    packed_float3 position;
+    half cov[6];        // xx, xy, xz, yy, yz, zz (world space)
+    uchar4 color;       // rgb + opacity
+    uint pad;
+};
+
+struct GSUniforms {
+    float4x4 view;
+    float4x4 projection;
+    float2 viewport;    // pixels
+    float2 focal;       // pixels
+};
+
+struct GSOut {
+    float4 position [[position]];
+    float2 local;       // position inside the splat in standard deviations
+    half4 color;
+};
+
+vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                      const device GSplat* splats [[ buffer(0) ]],
+                      const device uint* order [[ buffer(1) ]],
+                      constant GSUniforms& u [[ buffer(2) ]]) {
+    GSOut o;
+    GSplat s = splats[order[iid]];
+    o.color = half4(s.color) / 255.0h;
+    o.local = float2(0);
+    float4 t = u.view * float4(float3(s.position), 1.0);
+    float d = -t.z;                               // distance in front of the camera
+    if (d < 0.02) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+    float4 clip = u.projection * t;
+    if (abs(clip.x) > 1.3 * clip.w || abs(clip.y) > 1.3 * clip.w) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+
+    float3x3 W = float3x3(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
+    float3x3 S = float3x3(float3(s.cov[0], s.cov[1], s.cov[2]),
+                          float3(s.cov[1], s.cov[3], s.cov[4]),
+                          float3(s.cov[2], s.cov[4], s.cov[5]));
+    float3x3 C = W * S * transpose(W);
+    // Jacobian of the perspective projection (pixels per view-space unit), y up like NDC.
+    float3 j0 = float3(u.focal.x / d, 0.0, u.focal.x * t.x / (d * d));
+    float3 j1 = float3(0.0, u.focal.y / d, u.focal.y * t.y / (d * d));
+    float a = dot(j0, C * j0) + 0.3;
+    float b = dot(j0, C * j1);
+    float c = dot(j1, C * j1) + 0.3;
+    float mid = 0.5 * (a + c);
+    float disc = sqrt(max(mid * mid - (a * c - b * b), 0.0));
+    float l1 = mid + disc;
+    float l2 = max(mid - disc, 0.0);
+    float2 v1 = abs(b) > 1e-7 ? normalize(float2(b, l1 - a)) : (a >= c ? float2(1, 0) : float2(0, 1));
+    float2 v2 = float2(-v1.y, v1.x);
+    float r1 = 3.0 * sqrt(l1);
+    float r2 = 3.0 * sqrt(l2);
+    if (r1 > 1500.0 || r1 < 0.3) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+
+    float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
+    float2 offsetPx = corner.x * v1 * r1 + corner.y * v2 * r2;
+    float2 ndc = offsetPx / (u.viewport * 0.5);
+    o.position = clip + float4(ndc * clip.w, 0.0, 0.0);
+    o.local = corner * 3.0;
+    return o;
+}
+
+fragment half4 gsFragment(GSOut in [[stage_in]]) {
+    float g = exp(-0.5 * dot(in.local, in.local));
+    float alpha = float(in.color.a) * g;
+    if (alpha < 1.0 / 255.0) {
+        discard_fragment();
+    }
+    return half4(in.color.rgb * half(alpha), half(alpha));   // premultiplied, drawn back to front
+}
