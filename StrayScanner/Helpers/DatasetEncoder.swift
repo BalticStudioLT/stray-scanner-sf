@@ -26,6 +26,13 @@ class DatasetEncoder {
     private let distortionEncoder: DistortionEncoder
     private let exposureEncoder: ExposureEncoder
     private let exposureController: ExposureController?
+    private let frameQualityEncoder: FrameQualityEncoder
+    private let markerEncoder: MarkerEncoder
+    /// Frames skipped because the encoder was still busy with earlier ones.
+    public private(set) var droppedFrames: Int = 0
+    public var savedFrameCount: Int { return savedFrames }
+    public var markerCount: Int { return markerEncoder.count }
+    public var directory: URL { return datasetDirectory }
     private var lastFrame: ARFrame?
     private var dispatchGroup = DispatchGroup()
     private var currentFrame: Int = -1
@@ -72,6 +79,18 @@ class DatasetEncoder {
         self.exposurePath = datasetDirectory.appendingPathComponent("exposure.csv", isDirectory: false)
         self.exposureEncoder = ExposureEncoder(url: self.exposurePath)
         self.captureSettingsPath = datasetDirectory.appendingPathComponent("capture_settings.json", isDirectory: false)
+        self.frameQualityEncoder = FrameQualityEncoder(url: datasetDirectory.appendingPathComponent("frame_quality.csv", isDirectory: false))
+        self.markerEncoder = MarkerEncoder(url: datasetDirectory.appendingPathComponent("markers.csv", isDirectory: false))
+    }
+
+    /// Pins the current camera pose to markers.csv (for guided-tour stops etc.).
+    func addMarker(frame: ARFrame) {
+        let frameNumber = savedFrames - 1
+        let transform = frame.camera.transform
+        let timestamp = frame.timestamp
+        queue.async {
+            self.markerEncoder.add(transform: transform, timestamp: timestamp, frameNumber: frameNumber)
+        }
     }
 
     /// Writes capture_settings.json (shutter setting, WB/focus lock state, ...) next to the other files.
@@ -86,7 +105,7 @@ class DatasetEncoder {
         }
     }
 
-    func add(frame: ARFrame) {
+    func add(frame: ARFrame, quality: FrameQuality? = nil) {
         let totalFrames: Int = currentFrame
         currentFrame = currentFrame + 1
         if (currentFrame % frameInterval != 0) {
@@ -94,6 +113,7 @@ class DatasetEncoder {
         }
         // Drop frame if encoding is backed up to avoid accumulating ARFrame references.
         guard encodingSemaphore.wait(timeout: .now()) == .success else {
+            droppedFrames += 1
             return
         }
         let frameNumber: Int = savedFrames
@@ -120,6 +140,9 @@ class DatasetEncoder {
             self.odometryEncoder.add(frame: frame, currentFrame: frameNumber)
             self.distortionEncoder.add(frame: frame, currentFrame: frameNumber)
             self.exposureEncoder.add(frame: frame, currentFrame: frameNumber, snapshot: exposureSnapshot)
+            if let quality = quality {
+                self.frameQualityEncoder.add(timestamp: frame.timestamp, frameNumber: frameNumber, quality: quality)
+            }
             self.lastFrame = frame
         }
     }
@@ -164,6 +187,10 @@ class DatasetEncoder {
         self.odometryEncoder.done()
         self.distortionEncoder.done()
         self.exposureEncoder.done()
+        self.frameQualityEncoder.done()
+        queue.sync {
+            self.markerEncoder.done()
+        }
         writeIntrinsics()
         switch self.rgbEncoder.status {
             case .allGood:

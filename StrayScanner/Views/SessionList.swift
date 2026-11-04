@@ -49,83 +49,69 @@ struct SessionList: View {
     @State private var showingInfo = false
 
     var body: some View {
-        ZStack {
-        Color.black
-        .ignoresSafeArea()
-        NavigationView {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Recordings")
-                        .foregroundColor(Color("TextColor"))
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
-                        .multilineTextAlignment(.center)
-                        .padding([.top, .leading], 15.0)
-                    Spacer()
-                    Button(action: {
-                        showingInfo.toggle()
-                    }, label: {
-                        Image(systemName: "info.circle")
-                            .resizable()
-                            .frame(width: 25, height: 25, alignment: .center)
-                            .padding(.top, 17)
-                            .padding(.trailing, 20)
-                            .foregroundColor(Color("TextColor"))
-                    }).sheet(isPresented: $showingInfo) {
-                        InformationView()
+        NavigationStack {
+            ZStack(alignment: .bottom) {
+                if viewModel.sessions.isEmpty {
+                    VStack(spacing: 14) {
+                        Image(systemName: "viewfinder")
+                            .font(.system(size: 56, weight: .thin))
+                            .foregroundStyle(.secondary)
+                        Text("No scans yet")
+                            .font(.title3.weight(.semibold))
+                        Text("Tap New scan, then walk slowly around the space.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
-                }
-
-                if !viewModel.sessions.isEmpty {
+                    .padding(40)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
                     List {
-                        ForEach(Array(viewModel.sessions.enumerated()), id: \.element) { i, recording in
+                        ForEach(viewModel.sessions, id: \.self) { recording in
                             NavigationLink(destination: SessionDetailView(recording: recording)) {
                                 SessionRow(session: recording)
                             }
+                            .listRowBackground(Color.clear)
                         }
+                        Color.clear.frame(height: 80).listRowBackground(Color.clear)
                     }
+                    .listStyle(.plain)
                     .scrollContentBackground(.hidden)
-                    Spacer()
-                } else {
-                    Spacer()
-                    Text("No recorded sessions. Record one, and it will appear here.")
-                        .font(.body)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 50.0)
                 }
-                HStack {
-                    Spacer()
-                    NavigationLink(destination: NewSessionView(), label: {
-                        Text("Record new session")
-                            .font(.title3)
-                            .padding(20)
-                            .background(Color("TextColor"))
-                            .foregroundColor(Color("LightColor"))
-                            .cornerRadius(35)
-                            .padding(20)
-                    })
-                    Spacer()
+
+                NavigationLink(destination: NewSessionView()) {
+                    Label("New scan", systemImage: "record.circle")
+                        .font(.title3.weight(.semibold))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
                 }
-                if (viewModel.sessions.isEmpty) {
-                    Spacer()
+                .glassButton(prominent: true)
+                .tint(.red)
+                .padding(.bottom, 20)
+            }
+            .navigationTitle("Scans")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showingInfo.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .accessibilityLabel("About")
                 }
             }
-            .navigationBarHidden(true)
-            .background(Color("BackgroundColor").ignoresSafeArea())
+            .sheet(isPresented: $showingInfo) {
+                InformationView()
+            }
             .onAppear {
                 DispatchQueue.main.async {
                     viewModel.fetchSessions()
                 }
-                FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).forEach({ url in
-                    let relative = url.relativeString
-                    print("relative url: \(relative)")
-                })
                 let delegate = UIApplication.shared.delegate as! AppDelegate
                 delegate.appDaemon?.removeDeletedEntries()
+            }
         }
-        }
-        .background(Color("BackgroundColor").edgesIgnoringSafeArea(.all))
-        }
+        .preferredColorScheme(.dark)
     }
 }
 

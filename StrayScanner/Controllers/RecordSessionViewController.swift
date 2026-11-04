@@ -5,6 +5,10 @@
 //  Created by Kenneth Blomqvist on 11/28/20.
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
+//  stray-scanner-sf: record screen rebuilt in code with Liquid Glass controls, view modes
+//  (camera / depth / mix / point cloud / dim), live scan statistics and guidance.
+//  Recording itself (DatasetEncoder, IMU, file formats) works exactly as before.
+//
 
 import Foundation
 import UIKit
@@ -33,8 +37,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var arConfiguration: ARWorldTrackingConfiguration?
     private let session = ARSession()
     private let motionManager = CMMotionManager()
-    private var renderer: CameraRenderer?
-    private var updateLabelTimer: Timer?
+    private var renderer: ScanRenderer?
+    private var uiTimer: Timer?
     private var startedRecording: Date?
     private var dataContext: NSManagedObjectContext!
     private var datasetEncoder: DatasetEncoder?
@@ -42,56 +46,99 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var chosenFpsSetting: Int = 0
     private let exposureController = ExposureController()
     private var chosenShutterSetting: ShutterSetting = ShutterSetting.defaultSetting
-    private let shutterButton = UIButton(type: .system)
-    @IBOutlet private var rgbView: MetalView!
-    @IBOutlet private var depthView: MetalView!
-    @IBOutlet private var recordButton: RecordButton!
-    @IBOutlet private var timeLabel: UILabel!
-    @IBOutlet weak var fpsButton: UIButton!
+    private let qualityMonitor = ScanQualityMonitor()
+    private var viewMode: ViewMode = .camera
+    private var lastFrame: ARFrame?
+    private var savedBrightness: CGFloat?
+    private var statsExpanded = true
+    private var lastAdvice: ScanAdvice?
+    private var lastHaptic = Date.distantPast
+    private var datasetBytes: Int64 = 0
+    private var freeBytes: Int64?
+    private var bytesPerSecond: Double = 0
+    private var sizeCheckRunning = false
+    private var lastSizeCheck = Date.distantPast
     var dismissFunction: Optional<() -> Void> = Optional.none
-    
+
+    // MARK: Views
+    private let previewView = MetalPreviewView()
+    private let closeButton = Glass.button(title: nil, symbol: "chevron.left")
+    private let timerPanel = Glass.panel(cornerRadius: 18)
+    private let timerDot = UIView()
+    private let timeLabel = UILabel()
+    private let trackingPanel = Glass.panel(cornerRadius: 18)
+    private let trackingDot = UIView()
+    private let trackingLabel = UILabel()
+    private let statsPanel = Glass.panel(cornerRadius: 20)
+    private let statsLabel = UILabel()
+    private let coverageRing = CoverageRingView()
+    private let advicePanel = Glass.panel(cornerRadius: 22)
+    private let adviceIcon = UIImageView()
+    private let adviceLabel = UILabel()
+    private let blurMeter = UIProgressView(progressViewStyle: .bar)
+    private let pinButton = Glass.button(title: nil, symbol: "mappin.and.ellipse")
+    private let pointHintLabel = UILabel()
+    private let dockPanel = Glass.panel(cornerRadius: 34)
+    private let modeControl = UISegmentedControl()
+    private let fpsButton = Glass.button(title: "60 fps", symbol: nil)
+    private let shutterButton = Glass.button(title: "1/250 s", symbol: "camera.aperture")
+    private let recordButton = GlassRecordButton()
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
-    override func viewWillAppear(_ animated: Bool) {
-        self.chosenFpsSetting = UserDefaults.standard.integer(forKey: FpsUserDefaultsKey)
-        updateFpsSetting()
-        self.chosenShutterSetting = ShutterSetting.load()
-        updateShutterButton()
+
+    // MARK: - Lifecycle
+
+    override func loadView() {
+        let root = UIView()
+        root.backgroundColor = .black
+        view = root
+        buildLayout()
     }
 
     override func viewDidLoad() {
+        super.viewDidLoad()
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
         self.dataContext = appDelegate.persistentContainer.newBackgroundContext()
-        self.renderer = CameraRenderer(rgbLayer: rgbView.layer, depthLayer: depthView.layer)
-
-        depthView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
-        rgbView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
-        
-        setViewProperties()
+        self.renderer = ScanRenderer(layer: previewView.metalLayer)
         session.delegate = self
-
-        recordButton.setCallback { (recording: Bool) in
-            self.toggleRecording(recording)
-        }
-        fpsButton.layer.masksToBounds = true
-        fpsButton.layer.cornerRadius = 12.0
-        setUpShutterButton()
-        
         imuOperationQueue.qualityOfService = .userInitiated
+        UIDevice.current.isBatteryMonitoringEnabled = true
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        session.pause();
-    }
+    override var prefersStatusBarHidden: Bool { return false }
+    override var preferredStatusBarStyle: UIStatusBarStyle { return .lightContent }
 
-    override func viewWillDisappear(_ animated: Bool) {
-        updateLabelTimer?.invalidate()
-        datasetEncoder = nil
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        chosenFpsSetting = UserDefaults.standard.integer(forKey: FpsUserDefaultsKey)
+        chosenShutterSetting = ShutterSetting.load()
+        updateFpsSetting()
+        updateShutterButton()
+        setViewMode(ViewMode.load(), save: false)
     }
 
     override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        UIApplication.shared.isIdleTimerDisabled = true
         startSession()
+        uiTimer?.invalidate()
+        uiTimer = Timer.scheduledTimer(timeInterval: 0.25, target: self, selector: #selector(uiTick), userInfo: nil, repeats: true)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        uiTimer?.invalidate()
+        uiTimer = nil
+        restoreBrightness()
+        UIApplication.shared.isIdleTimerDisabled = false
+        datasetEncoder = nil
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        session.pause()
     }
 
     private func startSession() {
@@ -107,7 +154,200 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             exposureController.apply(chosenShutterSetting)
         }
     }
-    
+
+    // MARK: - Layout
+
+    private func buildLayout() {
+        previewView.translatesAutoresizingMaskIntoConstraints = false
+        previewView.backgroundColor = .black
+        view.addSubview(previewView)
+        previewView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(previewTapped)))
+
+        // Top bar: back, timer, tracking state.
+        closeButton.accessibilityLabel = "Back"
+        closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        configurePill(timerPanel, dot: timerDot, label: timeLabel, dotColor: UIColor(white: 1, alpha: 0.5), text: "00:00:00")
+        configurePill(trackingPanel, dot: trackingDot, label: trackingLabel, dotColor: .systemYellow, text: "Starting")
+
+        // Stats card with direction ring.
+        statsLabel.numberOfLines = 0
+        statsLabel.textColor = .white
+        statsLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        statsLabel.translatesAutoresizingMaskIntoConstraints = false
+        coverageRing.translatesAutoresizingMaskIntoConstraints = false
+        statsPanel.contentView.addSubview(statsLabel)
+        statsPanel.contentView.addSubview(coverageRing)
+        statsPanel.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(statsTapped)))
+
+        // Advice banner with blur meter.
+        adviceIcon.translatesAutoresizingMaskIntoConstraints = false
+        adviceIcon.tintColor = .white
+        adviceIcon.contentMode = .scaleAspectFit
+        adviceLabel.translatesAutoresizingMaskIntoConstraints = false
+        adviceLabel.textColor = .white
+        adviceLabel.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        adviceLabel.numberOfLines = 2
+        adviceLabel.adjustsFontSizeToFitWidth = true
+        adviceLabel.minimumScaleFactor = 0.8
+        blurMeter.translatesAutoresizingMaskIntoConstraints = false
+        blurMeter.trackTintColor = UIColor(white: 1, alpha: 0.15)
+        blurMeter.layer.cornerRadius = 2
+        blurMeter.clipsToBounds = true
+        advicePanel.contentView.addSubview(adviceIcon)
+        advicePanel.contentView.addSubview(adviceLabel)
+        advicePanel.contentView.addSubview(blurMeter)
+
+        pinButton.accessibilityLabel = "Pin this spot"
+        pinButton.addTarget(self, action: #selector(pinTapped), for: .touchUpInside)
+        pinButton.isEnabled = false
+
+        pointHintLabel.translatesAutoresizingMaskIntoConstraints = false
+        pointHintLabel.text = "Tap to switch view"
+        pointHintLabel.textColor = UIColor(white: 1, alpha: 0.6)
+        pointHintLabel.font = UIFont.systemFont(ofSize: 11, weight: .medium)
+        pointHintLabel.isHidden = true
+
+        // Bottom dock: view modes, fps, record, shutter.
+        for mode in ViewMode.allCases {
+            let image = UIImage(systemName: mode.symbolName)
+            image?.accessibilityLabel = mode.title
+            modeControl.insertSegment(with: image, at: mode.rawValue, animated: false)
+        }
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        modeControl.selectedSegmentTintColor = UIColor(white: 1, alpha: 0.3)
+        modeControl.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
+        fpsButton.addTarget(self, action: #selector(fpsButtonTapped), for: .touchUpInside)
+        fpsButton.accessibilityLabel = "Frame rate"
+        shutterButton.addTarget(self, action: #selector(shutterButtonTapped), for: .touchUpInside)
+        shutterButton.accessibilityLabel = "Shutter speed"
+        recordButton.translatesAutoresizingMaskIntoConstraints = false
+        recordButton.addTarget(self, action: #selector(recordTapped), for: .touchUpInside)
+
+        let modeTitle = UILabel()
+        modeTitle.translatesAutoresizingMaskIntoConstraints = false
+        modeTitle.tag = 501
+        modeTitle.textColor = UIColor(white: 1, alpha: 0.75)
+        modeTitle.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+        modeTitle.textAlignment = .center
+
+        let controlsRow = UIStackView(arrangedSubviews: [fpsButton, recordButton, shutterButton])
+        controlsRow.translatesAutoresizingMaskIntoConstraints = false
+        controlsRow.axis = .horizontal
+        controlsRow.alignment = .center
+        controlsRow.distribution = .equalCentering
+
+        dockPanel.contentView.addSubview(modeControl)
+        dockPanel.contentView.addSubview(modeTitle)
+        dockPanel.contentView.addSubview(controlsRow)
+
+        [statsPanel, advicePanel, pinButton, pointHintLabel, dockPanel, closeButton, timerPanel, trackingPanel].forEach { view.addSubview($0) }
+
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            previewView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            previewView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            previewView.topAnchor.constraint(equalTo: safe.topAnchor),
+            previewView.heightAnchor.constraint(equalTo: previewView.widthAnchor, multiplier: 4.0 / 3.0),
+
+            closeButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            closeButton.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
+            closeButton.widthAnchor.constraint(equalToConstant: 44),
+            closeButton.heightAnchor.constraint(equalToConstant: 44),
+
+            timerPanel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            timerPanel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            timerPanel.heightAnchor.constraint(equalToConstant: 36),
+
+            trackingPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            trackingPanel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            trackingPanel.heightAnchor.constraint(equalToConstant: 36),
+
+            statsPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            statsPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            statsPanel.topAnchor.constraint(equalTo: closeButton.bottomAnchor, constant: 10),
+            statsLabel.leadingAnchor.constraint(equalTo: statsPanel.contentView.leadingAnchor, constant: 14),
+            statsLabel.topAnchor.constraint(equalTo: statsPanel.contentView.topAnchor, constant: 10),
+            statsLabel.bottomAnchor.constraint(equalTo: statsPanel.contentView.bottomAnchor, constant: -10),
+            statsLabel.trailingAnchor.constraint(equalTo: coverageRing.leadingAnchor, constant: -10),
+            coverageRing.trailingAnchor.constraint(equalTo: statsPanel.contentView.trailingAnchor, constant: -12),
+            coverageRing.centerYAnchor.constraint(equalTo: statsPanel.contentView.centerYAnchor),
+            coverageRing.widthAnchor.constraint(equalToConstant: 54),
+            coverageRing.heightAnchor.constraint(equalToConstant: 54),
+            statsPanel.contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 70),
+
+            advicePanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            advicePanel.trailingAnchor.constraint(equalTo: pinButton.leadingAnchor, constant: -8),
+            advicePanel.bottomAnchor.constraint(equalTo: previewView.bottomAnchor, constant: -10),
+            adviceIcon.leadingAnchor.constraint(equalTo: advicePanel.contentView.leadingAnchor, constant: 14),
+            adviceIcon.centerYAnchor.constraint(equalTo: adviceLabel.centerYAnchor),
+            adviceIcon.widthAnchor.constraint(equalToConstant: 22),
+            adviceIcon.heightAnchor.constraint(equalToConstant: 22),
+            adviceLabel.leadingAnchor.constraint(equalTo: adviceIcon.trailingAnchor, constant: 10),
+            adviceLabel.trailingAnchor.constraint(equalTo: advicePanel.contentView.trailingAnchor, constant: -14),
+            adviceLabel.topAnchor.constraint(equalTo: advicePanel.contentView.topAnchor, constant: 10),
+            blurMeter.leadingAnchor.constraint(equalTo: adviceLabel.leadingAnchor),
+            blurMeter.trailingAnchor.constraint(equalTo: adviceLabel.trailingAnchor),
+            blurMeter.topAnchor.constraint(equalTo: adviceLabel.bottomAnchor, constant: 6),
+            blurMeter.heightAnchor.constraint(equalToConstant: 4),
+            blurMeter.bottomAnchor.constraint(equalTo: advicePanel.contentView.bottomAnchor, constant: -10),
+
+            pinButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            pinButton.centerYAnchor.constraint(equalTo: advicePanel.centerYAnchor),
+            pinButton.widthAnchor.constraint(equalToConstant: 52),
+            pinButton.heightAnchor.constraint(equalToConstant: 52),
+
+            pointHintLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            pointHintLabel.bottomAnchor.constraint(equalTo: advicePanel.topAnchor, constant: -6),
+
+            dockPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            dockPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            dockPanel.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -6),
+            modeControl.topAnchor.constraint(equalTo: dockPanel.contentView.topAnchor, constant: 14),
+            modeControl.leadingAnchor.constraint(equalTo: dockPanel.contentView.leadingAnchor, constant: 16),
+            modeControl.trailingAnchor.constraint(equalTo: dockPanel.contentView.trailingAnchor, constant: -16),
+            modeControl.heightAnchor.constraint(equalToConstant: 34),
+            modeTitle.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 4),
+            modeTitle.centerXAnchor.constraint(equalTo: dockPanel.contentView.centerXAnchor),
+            controlsRow.topAnchor.constraint(equalTo: modeTitle.bottomAnchor, constant: 6),
+            controlsRow.leadingAnchor.constraint(equalTo: dockPanel.contentView.leadingAnchor, constant: 18),
+            controlsRow.trailingAnchor.constraint(equalTo: dockPanel.contentView.trailingAnchor, constant: -18),
+            controlsRow.bottomAnchor.constraint(equalTo: dockPanel.contentView.bottomAnchor, constant: -14),
+            recordButton.widthAnchor.constraint(equalToConstant: 82),
+            recordButton.heightAnchor.constraint(equalToConstant: 82),
+            fpsButton.widthAnchor.constraint(equalToConstant: 104),
+            shutterButton.widthAnchor.constraint(equalToConstant: 104),
+        ])
+        // Keep the dock below the preview when there is room; on short screens it may overlap it.
+        let gap = dockPanel.topAnchor.constraint(greaterThanOrEqualTo: previewView.bottomAnchor, constant: 10)
+        gap.priority = .defaultHigh
+        gap.isActive = true
+        updateStatsText()
+        applyAdvice(ScanAdvice(level: .info, text: "Starting camera…", symbolName: "camera.fill"))
+    }
+
+    private func configurePill(_ panel: UIVisualEffectView, dot: UIView, label: UILabel, dotColor: UIColor, text: String) {
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.backgroundColor = dotColor
+        dot.layer.cornerRadius = 5
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = text
+        label.textColor = .white
+        label.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+        panel.contentView.addSubview(dot)
+        panel.contentView.addSubview(label)
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: panel.contentView.leadingAnchor, constant: 12),
+            dot.centerYAnchor.constraint(equalTo: panel.contentView.centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 10),
+            dot.heightAnchor.constraint(equalToConstant: 10),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: panel.contentView.trailingAnchor, constant: -12),
+            label.centerYAnchor.constraint(equalTo: panel.contentView.centerYAnchor),
+        ])
+    }
+
+    // MARK: - IMU
+
     private func startRawIMU() {
         if self.motionManager.isAccelerometerAvailable {
             self.motionManager.accelerometerUpdateInterval = 1.0 / 1200.0 // Set update rate
@@ -150,33 +390,38 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             print("Stopped gyroscope updates.")
         }
     }
-    
-    private func toggleRecording(_ recording: Bool) {
+
+    // MARK: - Recording
+
+    @objc private func recordTapped() {
         if unsupported {
             showUnsupportedAlert()
             return
         }
-        if recording && self.startedRecording == nil {
+        if startedRecording == nil {
             startRecording()
-        } else if self.startedRecording != nil && !recording {
-            stopRecording()
         } else {
-            print("This should not happen. We are either not recording and want to stop, or we are recording and want to start.")
+            stopRecording()
         }
     }
 
     private func startRecording() {
         self.startedRecording = Date()
-        updateTime()
-        updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            self.updateTime()
-        }
+        recordButton.isRecording = true
+        qualityMonitor.resetForRecording()
+        renderer?.resetPointCloud()
+        datasetBytes = 0
+        bytesPerSecond = 0
         exposureController.lockForRecording()
         shutterButton.isEnabled = false
         fpsButton.isEnabled = false
+        closeButton.isEnabled = false
+        pinButton.isEnabled = true
+        timerDot.backgroundColor = .systemRed
         datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting], exposureController: exposureController)
         datasetEncoder?.writeCaptureSettings(exposureController.captureSettings())
         startRawIMU()
+        updateTime()
     }
 
     private func stopRecording() {
@@ -185,14 +430,16 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             return
         }
         startedRecording = nil
-        updateLabelTimer?.invalidate()
-        updateLabelTimer = nil
+        recordButton.isRecording = false
         // Stop IMU updates
         stopRawIMU()
         datasetEncoder?.wrapUp()
         exposureController.unlockAfterRecording()
         shutterButton.isEnabled = true
         fpsButton.isEnabled = true
+        closeButton.isEnabled = true
+        pinButton.isEnabled = false
+        timerDot.backgroundColor = UIColor(white: 1, alpha: 0.5)
         if let encoder = datasetEncoder {
             switch encoder.status {
                 case .allGood:
@@ -205,12 +452,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         } else {
             print("No dataset encoder. Something is wrong.")
         }
+        restoreBrightness()
         self.dismissFunction?()
     }
 
     private func saveRecording(_ started: Date, _ encoder: DatasetEncoder) {
         let sessionCount = countSessions()
-        
+
         let duration = Date().timeIntervalSince(started)
         let entity = NSEntityDescription.entity(forEntityName: "Recording", in: self.dataContext)!
         let recording: Recording = Recording(entity: entity, insertInto: self.dataContext)
@@ -237,29 +485,74 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         self.present(controller, animated: true, completion: nil)
     }
 
-    private func updateTime() {
-        guard let started = self.startedRecording else { return }
-        let seconds = Date().timeIntervalSince(started)
-        let minutes: Int = Int(floor(seconds / 60).truncatingRemainder(dividingBy: 60))
-        let hours: Int = Int(floor(seconds / 3600))
-        let roundSeconds: Int = Int(floor(seconds.truncatingRemainder(dividingBy: 60)))
-        self.timeLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, roundSeconds)
+    // MARK: - Actions
+
+    @objc private func closeTapped() {
+        guard startedRecording == nil else { return }
+        dismissFunction?()
     }
 
-    @objc func viewTapped() {
-        switch renderer!.renderMode {
-            case .depth:
-                renderer!.renderMode = RenderMode.rgb
-                rgbView.isHidden = false
-                depthView.isHidden = true
-            case .rgb:
-                renderer!.renderMode = RenderMode.depth
-                depthView.isHidden = false
-                rgbView.isHidden = true
+    @objc private func pinTapped() {
+        guard startedRecording != nil, let frame = lastFrame, let encoder = datasetEncoder else { return }
+        encoder.addMarker(frame: frame)
+        if #available(iOS 17.5, *) {
+            UIImpactFeedbackGenerator(style: .medium, view: view).impactOccurred()
+        } else {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+        updateStatsText()
+    }
+
+    @objc private func previewTapped() {
+        guard viewMode == .pointCloud, let renderer = renderer else { return }
+        renderer.chaseCamera.toggle()
+        pointHintLabel.text = renderer.chaseCamera ? "Overview · tap for camera view" : "Camera view · tap for overview"
+    }
+
+    @objc private func statsTapped() {
+        statsExpanded.toggle()
+        updateStatsText()
+    }
+
+    @objc private func modeChanged() {
+        if let mode = ViewMode(rawValue: modeControl.selectedSegmentIndex) {
+            setViewMode(mode, save: true)
         }
     }
-    
-    @IBAction func fpsButtonTapped() {
+
+    private func setViewMode(_ mode: ViewMode, save: Bool) {
+        viewMode = mode
+        renderer?.mode = mode
+        modeControl.selectedSegmentIndex = mode.rawValue
+        if let title = view.viewWithTag(501) as? UILabel {
+            title.text = mode == .dim ? "Dim · screen off to save battery" : mode.title
+        }
+        pointHintLabel.isHidden = mode != .pointCloud
+        if mode == .pointCloud, let renderer = renderer {
+            pointHintLabel.text = renderer.chaseCamera ? "Overview · tap for camera view" : "Camera view · tap for overview"
+        }
+        if mode == .dim {
+            let screen = view.window?.windowScene?.screen
+            if savedBrightness == nil { savedBrightness = screen?.brightness }
+            screen?.brightness = 0.05
+            statsPanel.alpha = 0.6
+            dockPanel.alpha = 0.6
+        } else {
+            restoreBrightness()
+            statsPanel.alpha = 1
+            dockPanel.alpha = 1
+        }
+        if save { mode.save() }
+    }
+
+    private func restoreBrightness() {
+        if let brightness = savedBrightness {
+            view.window?.windowScene?.screen.brightness = brightness
+            savedBrightness = nil
+        }
+    }
+
+    @objc func fpsButtonTapped() {
         chosenFpsSetting = (chosenFpsSetting + 1) % AvailableFpsSettings.count
         updateFpsSetting()
         UserDefaults.standard.set(chosenFpsSetting, forKey: FpsUserDefaultsKey)
@@ -274,54 +567,180 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         exposureController.apply(chosenShutterSetting)
     }
 
-    private func setUpShutterButton() {
-        shutterButton.translatesAutoresizingMaskIntoConstraints = false
-        shutterButton.backgroundColor = fpsButton.backgroundColor
-        shutterButton.tintColor = fpsButton.tintColor
-        shutterButton.titleLabel?.font = fpsButton.titleLabel?.font
-        shutterButton.layer.masksToBounds = true
-        shutterButton.layer.cornerRadius = 12.0
-        shutterButton.addTarget(self, action: #selector(shutterButtonTapped), for: .touchUpInside)
-        shutterButton.accessibilityLabel = "Shutter speed"
-        view.addSubview(shutterButton)
-        NSLayoutConstraint.activate([
-            shutterButton.leadingAnchor.constraint(equalTo: fpsButton.trailingAnchor, constant: 8),
-            shutterButton.centerYAnchor.constraint(equalTo: fpsButton.centerYAnchor),
-            shutterButton.heightAnchor.constraint(equalTo: fpsButton.heightAnchor),
-            shutterButton.widthAnchor.constraint(greaterThanOrEqualTo: fpsButton.widthAnchor),
-        ])
+    private func updateFpsSetting() {
+        Glass.setTitle(fpsButton, "\(AvailableFpsSettings[chosenFpsSetting]) fps")
+    }
+
+    private func updateShutterButton() {
+        let label = exposureController.isAvailable ? chosenShutterSetting.label : ShutterSetting.auto.label
+        Glass.setTitle(shutterButton, label == "Auto" ? "Auto" : label)
         if !exposureController.isAvailable {
             shutterButton.isEnabled = false
         }
     }
 
-    private func updateShutterButton() {
-        let label = exposureController.isAvailable ? chosenShutterSetting.label : ShutterSetting.auto.label
-        let title = label == "Auto" ? "Auto exp" : "\(label) s"
-        shutterButton.setTitle(title, for: .normal)
-    }
+    // MARK: - Frames
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        self.renderer!.render(frame: frame)
-        if startedRecording != nil {
+        lastFrame = frame
+        let recording = startedRecording != nil
+        qualityMonitor.update(frame: frame, recording: recording)
+        renderer?.render(frame: frame)
+        if recording {
             if let encoder = datasetEncoder {
-                encoder.add(frame: frame)
+                encoder.add(frame: frame, quality: qualityMonitor.currentQuality())
             } else {
                 print("There is no video encoder. That can't be good.")
             }
         }
     }
 
-    private func setViewProperties() {
-        self.view.backgroundColor = UIColor(named: "BackgroundColor")
+    // MARK: - HUD
+
+    @objc private func uiTick() {
+        updateTime()
+        updateTracking()
+        updateStatsText()
+        coverageRing.update(covered: qualityMonitor.coveredSectors, current: qualityMonitor.headingSector)
+        let seconds = startedRecording.map { Date().timeIntervalSince($0) } ?? 0
+        let advice = qualityMonitor.advice(recording: startedRecording != nil,
+                                           recordingSeconds: seconds,
+                                           underexposed: exposureController.isUnderexposed,
+                                           thermalState: ProcessInfo.processInfo.thermalState,
+                                           freeMinutes: freeMinutes)
+        applyAdvice(advice)
+        let blurRatio = qualityMonitor.blurPixels / ScanQualityMonitor.blurBadLimit
+        blurMeter.setProgress(min(max(blurRatio, 0.02), 1), animated: true)
+        blurMeter.progressTintColor = qualityMonitor.blurPixels > ScanQualityMonitor.blurBadLimit ? .systemRed
+            : (qualityMonitor.blurPixels > ScanQualityMonitor.blurGoodLimit ? .systemYellow : .systemGreen)
+        refreshStorage()
     }
-    
-    private func updateFpsSetting() {
-        let fps = AvailableFpsSettings[chosenFpsSetting]
-        let buttonLabel: String = "\(fps) fps"
-        fpsButton.setTitle(buttonLabel, for: UIControl.State.normal)
+
+    private func updateTime() {
+        guard let started = self.startedRecording else {
+            timeLabel.text = "00:00:00"
+            return
+        }
+        let seconds = Date().timeIntervalSince(started)
+        let minutes: Int = Int(floor(seconds / 60).truncatingRemainder(dividingBy: 60))
+        let hours: Int = Int(floor(seconds / 3600))
+        let roundSeconds: Int = Int(floor(seconds.truncatingRemainder(dividingBy: 60)))
+        timeLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, roundSeconds)
     }
-    
+
+    private func updateTracking() {
+        switch qualityMonitor.trackingState {
+        case .normal:
+            trackingDot.backgroundColor = .systemGreen
+            trackingLabel.text = "Tracking"
+        case .limited:
+            trackingDot.backgroundColor = .systemYellow
+            trackingLabel.text = "Limited"
+        case .notAvailable:
+            trackingDot.backgroundColor = .systemRed
+            trackingLabel.text = "No tracking"
+        }
+    }
+
+    private var freeMinutes: Double? {
+        guard let free = freeBytes, bytesPerSecond > 1000 else { return nil }
+        return Double(free) / bytesPerSecond / 60
+    }
+
+    private func updateStatsText() {
+        let m = qualityMonitor
+        var exposure = "Auto exposure"
+        if let frame = lastFrame {
+            let duration = frame.camera.exposureDuration
+            let shutter = duration > 0 ? "1/\(Int((1 / duration).rounded())) s" : "–"
+            let iso = exposureController.snapshot().map { "ISO \(Int($0.iso))" } ?? ""
+            let wb = exposureController.isCaptureLocked ? " · WB+focus locked" : ""
+            exposure = "\(shutter) \(iso)\(wb)"
+        }
+        let blur = String(format: "Blur %.1f px · turn %.0f°/s (max %.0f)", m.blurPixels, m.angularSpeedDegrees, m.maxAngularSpeedForSharpFrames)
+        let distance = m.medianDepth > 0 ? String(format: "%.1f m", m.medianDepth) : "–"
+        let motion = String(format: "Subject %@ · walk %.2f m/s · moved %.1f m", distance, m.linearSpeed, m.distanceTravelled)
+        var lines = [exposure, blur, motion]
+        if statsExpanded {
+            let frames = datasetEncoder.map { "Frames \($0.savedFrameCount) · dropped \($0.droppedFrames) · pins \($0.markerCount)" } ?? "Not recording"
+            let surface = String(format: "Scanned ≈ %.0f m² · LiDAR %.0f%% confident", renderer?.pointCloud.surfaceArea ?? 0, m.confidentFraction * 100)
+            var storage = "Free " + ByteCountFormatter.string(fromByteCount: freeBytes ?? 0, countStyle: .file)
+            if startedRecording != nil {
+                storage += " · scan " + ByteCountFormatter.string(fromByteCount: datasetBytes, countStyle: .file)
+                if let minutes = freeMinutes { storage += String(format: " · ~%.0f min left", minutes) }
+            }
+            let battery = UIDevice.current.batteryLevel
+            if battery >= 0 { storage += String(format: " · battery %.0f%%", battery * 100) }
+            lines += [frames, surface, storage]
+        }
+        statsLabel.text = lines.joined(separator: "\n")
+    }
+
+    private func applyAdvice(_ advice: ScanAdvice) {
+        if advice != lastAdvice {
+            adviceLabel.text = advice.text
+            adviceIcon.image = UIImage(systemName: advice.symbolName)
+            let tint: UIColor?
+            switch advice.level {
+            case .bad: tint = UIColor.systemRed.withAlphaComponent(0.55)
+            case .warning: tint = UIColor.systemOrange.withAlphaComponent(0.45)
+            case .good: tint = UIColor.systemGreen.withAlphaComponent(0.3)
+            case .info: tint = UIColor.systemBlue.withAlphaComponent(0.35)
+            }
+            Glass.setTint(advicePanel, tint)
+            lastAdvice = advice
+        }
+        // Buzz for serious problems so the screen doesn't need watching (useful in dim mode).
+        if advice.level == .bad, startedRecording != nil, Date().timeIntervalSince(lastHaptic) > 2.0 {
+            if #available(iOS 17.5, *) {
+                UINotificationFeedbackGenerator(view: view).notificationOccurred(.warning)
+            } else {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            }
+            lastHaptic = Date()
+        }
+    }
+
+    private func refreshStorage() {
+        guard !sizeCheckRunning, Date().timeIntervalSince(lastSizeCheck) > 3 else { return }
+        sizeCheckRunning = true
+        lastSizeCheck = Date()
+        let directory = datasetEncoder?.directory
+        let started = startedRecording
+        DispatchQueue.global(qos: .utility).async {
+            let free = RecordSessionViewController.freeDiskBytes()
+            let size = directory.map { RecordSessionViewController.directorySize($0) } ?? 0
+            DispatchQueue.main.async {
+                self.freeBytes = free
+                self.datasetBytes = size
+                if let started = started {
+                    let elapsed = Date().timeIntervalSince(started)
+                    if elapsed > 5 { self.bytesPerSecond = Double(size) / elapsed }
+                }
+                self.sizeCheckRunning = false
+            }
+        }
+    }
+
+    private static func freeDiskBytes() -> Int64? {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+
+    private static func directorySize(_ url: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            if let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    // MARK: - Misc
+
     private func showUnsupportedAlert() {
         let alert = UIAlertController(title: "Unsupported device", message: "This device doesn't seem to have the required level of ARKit support.", preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default, handler: { _ in
@@ -329,7 +748,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }))
         self.present(alert, animated: true)
     }
-    
+
     private func countSessions() -> Int {
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return 0 }
         let request = NSFetchRequest<NSManagedObject>(entityName: "Recording")

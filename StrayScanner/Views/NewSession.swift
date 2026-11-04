@@ -25,7 +25,7 @@ struct RecordSessionManager: UIViewControllerRepresentable {
     @Environment(\.presentationMode) var presentationMode: Binding<PresentationMode>
     
     func makeUIViewController(context: Context) -> some UIViewController {
-        let viewController = RecordSessionViewController(nibName: "RecordSessionView", bundle: nil)
+        let viewController = RecordSessionViewController()
         viewController.setDismissFunction {
             presentationMode.wrappedValue.dismiss()
             viewController.setDismissFunction(Optional.none)
@@ -40,13 +40,9 @@ struct NewSessionView : View {
     
     var body: some View {
         RecordSessionManager()
-            .padding(.vertical, 0.0)
-            .navigationBarTitle("Recording")
-            .navigationBarTitleDisplayMode(.inline)
-            .edgesIgnoringSafeArea(.all)
-            .background(NavigationConfigurator { nc in
-                nc.navigationBar.barTintColor = UIColor(named: "BackgroundColor")
-            })
+            .ignoresSafeArea()
+            .toolbar(.hidden, for: .navigationBar)
+            .preferredColorScheme(.dark)
 
     }
 }

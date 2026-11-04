@@ -186,6 +186,12 @@ final class ExposureController {
         isCaptureLocked = false
     }
 
+    /// True when ISO is at its maximum and the picture is still darker than the meter wants.
+    var isUnderexposed: Bool {
+        guard let device = device, setting != .auto else { return false }
+        return device.iso >= device.activeFormat.maxISO * 0.95 && device.exposureTargetOffset < -1.0
+    }
+
     // MARK: - Logging
 
     func snapshot() -> ExposureSnapshot? {

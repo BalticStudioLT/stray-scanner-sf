@@ -25,6 +25,10 @@
 		3863FE5F25FCBB0E00C1DA4F /* NewSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E969CA2572608E00054CC4 /* NewSession.swift */; };
 		3863FE6225FCBB0E00C1DA4F /* RecordSessionViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38FB730E2572A9FA007D9CB0 /* RecordSessionViewController.swift */; };
 		3863FE6325FCBB0E00C1DA4F /* SessionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38045D572561A7370004F23C /* SessionRow.swift */; };
+		70D1275B2E1800000027BEEF /* ScanSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1275A2E1800000027BEEF /* ScanSummary.swift */; };
+		70D1275C2E1800000027BEEF /* ScanSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1275A2E1800000027BEEF /* ScanSummary.swift */; };
+		70D1274B2E1800000027BEEF /* GlassControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1274A2E1800000027BEEF /* GlassControls.swift */; };
+		70D1274C2E1800000027BEEF /* GlassControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1274A2E1800000027BEEF /* GlassControls.swift */; };
 		3863FE6425FCBB0E00C1DA4F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = 38FB73152572AF63007D9CB0 /* Shaders.metal */; };
 		3863FE6525FCBB0E00C1DA4F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385999BC25616F2B00F3F681 /* AppDelegate.swift */; };
 		3863FE6625FCBB0E00C1DA4F /* SessionDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38C17B22259D1C80006B3FDA /* SessionDetail.swift */; };
@@ -58,6 +62,14 @@
 		38694C8326D2C66F00546EA1 /* AppDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38694C7326D2C66F00546EA1 /* AppDaemon.swift */; };
 		70D1234B2E1800000027BEEF /* DistortionEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1234A2E1800000027BEEF /* DistortionEncoder.swift */; };
 		70D1234C2E1800000027BEEF /* DistortionEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1234A2E1800000027BEEF /* DistortionEncoder.swift */; };
+		70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
+		70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
+		70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */; };
+		70D1272C2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */; };
+		70D1271B2E1800000027BEEF /* ScanRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1271A2E1800000027BEEF /* ScanRenderer.swift */; };
+		70D1271C2E1800000027BEEF /* ScanRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1271A2E1800000027BEEF /* ScanRenderer.swift */; };
+		70D1270B2E1800000027BEEF /* PointCloudAccumulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1270A2E1800000027BEEF /* PointCloudAccumulator.swift */; };
+		70D1270C2E1800000027BEEF /* PointCloudAccumulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1270A2E1800000027BEEF /* PointCloudAccumulator.swift */; };
 		70D1236B2E1800000027BEEF /* ExposureEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1236A2E1800000027BEEF /* ExposureEncoder.swift */; };
 		70D1236C2E1800000027BEEF /* ExposureEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1236A2E1800000027BEEF /* ExposureEncoder.swift */; };
 		70D1235B2E1800000027BEEF /* ExposureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1235A2E1800000027BEEF /* ExposureController.swift */; };
@@ -88,6 +100,8 @@
 
 /* Begin PBXFileReference section */
 		09A6D95A8151C51C3ECF4131 /* Pods-StrayScanner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-StrayScanner.release.xcconfig"; path = "Target Support Files/Pods-StrayScanner/Pods-StrayScanner.release.xcconfig"; sourceTree = "<group>"; };
+		70D1274A2E1800000027BEEF /* GlassControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassControls.swift; sourceTree = "<group>"; };
+		70D1275A2E1800000027BEEF /* ScanSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanSummary.swift; sourceTree = "<group>"; };
 		38045D572561A7370004F23C /* SessionRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRow.swift; sourceTree = "<group>"; };
 		38045D592561AC000004F23C /* SessionList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionList.swift; sourceTree = "<group>"; };
 		3807420A27BBCE83003194C1 /* PngEncoder.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PngEncoder.mm; sourceTree = "<group>"; };
@@ -114,6 +128,10 @@
 		38694C7326D2C66F00546EA1 /* AppDaemon.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDaemon.swift; sourceTree = "<group>"; };
 		70D1235A2E1800000027BEEF /* ExposureController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExposureController.swift; sourceTree = "<group>"; };
 		70D1236A2E1800000027BEEF /* ExposureEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExposureEncoder.swift; sourceTree = "<group>"; };
+		70D1270A2E1800000027BEEF /* PointCloudAccumulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudAccumulator.swift; sourceTree = "<group>"; };
+		70D1271A2E1800000027BEEF /* ScanRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRenderer.swift; sourceTree = "<group>"; };
+		70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanQualityMonitor.swift; sourceTree = "<group>"; };
+		70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameQualityEncoder.swift; sourceTree = "<group>"; };
 		70D1234A2E1800000027BEEF /* DistortionEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DistortionEncoder.swift; sourceTree = "<group>"; };
 		386E277725991163007D023B /* RecordButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordButton.swift; sourceTree = "<group>"; };
 		3872B88825962BBA00A3370C /* Colors.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Colors.xcassets; sourceTree = "<group>"; };
@@ -192,6 +210,8 @@
 			isa = PBXGroup;
 			children = (
 				38045D572561A7370004F23C /* SessionRow.swift */,
+				70D1275A2E1800000027BEEF /* ScanSummary.swift */,
+				70D1274A2E1800000027BEEF /* GlassControls.swift */,
 				38045D592561AC000004F23C /* SessionList.swift */,
 				38E969CA2572608E00054CC4 /* NewSession.swift */,
 				386E277725991163007D023B /* RecordButton.swift */,
@@ -265,6 +285,10 @@
 				38694C7126D2C66F00546EA1 /* OdometryEncoder.swift */,
 				38694C7226D2C66F00546EA1 /* DepthEncoder.swift */,
 				70D1234A2E1800000027BEEF /* DistortionEncoder.swift */,
+				70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */,
+				70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */,
+				70D1271A2E1800000027BEEF /* ScanRenderer.swift */,
+				70D1270A2E1800000027BEEF /* PointCloudAccumulator.swift */,
 				70D1236A2E1800000027BEEF /* ExposureEncoder.swift */,
 				70D1235A2E1800000027BEEF /* ExposureController.swift */,
 				38694C7326D2C66F00546EA1 /* AppDaemon.swift */,
@@ -516,6 +540,8 @@
 				38694C7E26D2C66F00546EA1 /* OdometryEncoder.swift in Sources */,
 				38694C7826D2C66F00546EA1 /* VideoEncoder.swift in Sources */,
 				38045D582561A7370004F23C /* SessionRow.swift in Sources */,
+				70D1275B2E1800000027BEEF /* ScanSummary.swift in Sources */,
+				70D1274B2E1800000027BEEF /* GlassControls.swift in Sources */,
 				38694C7426D2C66F00546EA1 /* DatasetEncoder.swift in Sources */,
 				3807420B27BBCE83003194C1 /* PngEncoder.mm in Sources */,
 				38694C7C26D2C66F00546EA1 /* CameraRenderer.swift in Sources */,
@@ -532,6 +558,10 @@
 				709259192E0B79AB00A7B62E /* ShareUtility.swift in Sources */,
 				38694C8026D2C66F00546EA1 /* DepthEncoder.swift in Sources */,
 				70D1234B2E1800000027BEEF /* DistortionEncoder.swift in Sources */,
+				70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
+				70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
+				70D1271B2E1800000027BEEF /* ScanRenderer.swift in Sources */,
+				70D1270B2E1800000027BEEF /* PointCloudAccumulator.swift in Sources */,
 				70D1236B2E1800000027BEEF /* ExposureEncoder.swift in Sources */,
 				70D1235B2E1800000027BEEF /* ExposureController.swift in Sources */,
 				38C17B13259BE1DA006B3FDA /* Recording+CoreDataProperties.swift in Sources */,
@@ -550,6 +580,8 @@
 				38694C7F26D2C66F00546EA1 /* OdometryEncoder.swift in Sources */,
 				38694C7926D2C66F00546EA1 /* VideoEncoder.swift in Sources */,
 				3863FE6325FCBB0E00C1DA4F /* SessionRow.swift in Sources */,
+				70D1275C2E1800000027BEEF /* ScanSummary.swift in Sources */,
+				70D1274C2E1800000027BEEF /* GlassControls.swift in Sources */,
 				38694C7526D2C66F00546EA1 /* DatasetEncoder.swift in Sources */,
 				38694C7D26D2C66F00546EA1 /* CameraRenderer.swift in Sources */,
 				38694C7B26D2C66F00546EA1 /* IMUEncoder.swift in Sources */,
@@ -566,6 +598,10 @@
 				70CF35492E17803700276207 /* ShareUtility.swift in Sources */,
 				38694C8126D2C66F00546EA1 /* DepthEncoder.swift in Sources */,
 				70D1234C2E1800000027BEEF /* DistortionEncoder.swift in Sources */,
+				70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
+				70D1272C2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
+				70D1271C2E1800000027BEEF /* ScanRenderer.swift in Sources */,
+				70D1270C2E1800000027BEEF /* PointCloudAccumulator.swift in Sources */,
 				70D1236C2E1800000027BEEF /* ExposureEncoder.swift in Sources */,
 				70D1235C2E1800000027BEEF /* ExposureController.swift in Sources */,
 				3863FE6E25FCBB0E00C1DA4F /* Recording+CoreDataProperties.swift in Sources */,

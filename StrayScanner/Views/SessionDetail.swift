@@ -50,6 +50,7 @@ struct SessionDetailView: View {
     @State private var isCreatingPackage = false
     @State private var player: AVPlayer?
     @State private var shareError: String?
+    @State private var summary: ScanSummary?
 
     let defaultUrl = URL(fileURLWithPath: "")
 
@@ -69,6 +70,22 @@ struct SessionDetailView: View {
                     }
                 }
             
+            if let summary = summary {
+                VStack(alignment: .leading, spacing: 8) {
+                    ScanSummaryChips(summary: summary)
+                    if let blur = summary.medianBlur {
+                        Text(String(format: "Median motion blur %.1f px · %d frames with limited tracking", blur, summary.limitedTrackingFrames))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .glassCard(cornerRadius: 20)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+
             HStack(spacing: 20) {
                 Button(action: shareItem) {
                     HStack {
@@ -81,16 +98,27 @@ struct SessionDetailView: View {
                         Text(isCreatingPackage ? "Preparing..." : "Share")
                             .fixedSize()
                     }
-                    .foregroundColor(isCreatingPackage ? .gray : .blue)
                     .frame(minWidth: 100)
                 }
+                .glassButton(prominent: true)
                 .disabled(isCreatingPackage)
-                
-                Button(action: deleteItem) {
-                    Text("Delete").foregroundColor(Color("DangerColor"))
+
+                Button(role: .destructive, action: deleteItem) {
+                    Label("Delete", systemImage: "trash")
                 }
+                .glassButton()
+                .tint(.red)
             }
             .padding(.top, 20)
+            Spacer()
+        }
+        .onAppear {
+            guard summary == nil else { return }
+            let directory = recording.directoryPath()
+            DispatchQueue.global(qos: .utility).async {
+                let loaded = ScanSummary.load(directory: directory)
+                DispatchQueue.main.async { summary = loaded }
+            }
         }
         .navigationBarTitle(viewModel.title(recording: recording))
         .background(Color("BackgroundColor"))
