@@ -24,6 +24,8 @@ class DatasetEncoder {
     private let odometryEncoder: OdometryEncoder
     private let imuEncoder: IMUEncoder
     private let distortionEncoder: DistortionEncoder
+    private let exposureEncoder: ExposureEncoder
+    private let exposureController: ExposureController?
     private var lastFrame: ARFrame?
     private var dispatchGroup = DispatchGroup()
     private var currentFrame: Int = -1
@@ -36,6 +38,8 @@ class DatasetEncoder {
     public let cameraMatrixPath: URL
     public let odometryPath: URL
     public let imuPath: URL
+    public let exposurePath: URL
+    public let captureSettingsPath: URL
     public var status = Status.allGood
     private let queue: DispatchQueue
     
@@ -43,8 +47,9 @@ class DatasetEncoder {
     private var latestGyroscopeData: (timestamp: Double, data: simd_double3)?
 
 
-    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1) {
+    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1, exposureController: ExposureController? = nil) {
         self.frameInterval = fpsDivider
+        self.exposureController = exposureController
         self.queue = DispatchQueue(label: "encoderQueue")
         
         let width = arConfiguration.videoFormat.imageResolution.width
@@ -64,6 +69,21 @@ class DatasetEncoder {
         self.imuPath = datasetDirectory.appendingPathComponent("imu.csv", isDirectory: false)
         self.imuEncoder = IMUEncoder(url: self.imuPath)
         self.distortionEncoder = DistortionEncoder(datasetDirectory: datasetDirectory)
+        self.exposurePath = datasetDirectory.appendingPathComponent("exposure.csv", isDirectory: false)
+        self.exposureEncoder = ExposureEncoder(url: self.exposurePath)
+        self.captureSettingsPath = datasetDirectory.appendingPathComponent("capture_settings.json", isDirectory: false)
+    }
+
+    /// Writes capture_settings.json (shutter setting, WB/focus lock state, ...) next to the other files.
+    func writeCaptureSettings(_ settings: [String: Any]) {
+        var info = settings
+        info["fps_divider"] = frameInterval
+        do {
+            let data = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: captureSettingsPath)
+        } catch let error {
+            print("Could not write capture settings. \(error.localizedDescription)")
+        }
     }
 
     func add(frame: ARFrame) {
@@ -78,6 +98,8 @@ class DatasetEncoder {
         }
         let frameNumber: Int = savedFrames
         savedFrames = savedFrames + 1
+        // Read ISO / white balance now, at frame arrival, not later on the encoding queue.
+        let exposureSnapshot = exposureController?.snapshot()
         dispatchGroup.enter()
         queue.async {
             defer {
@@ -97,6 +119,7 @@ class DatasetEncoder {
             self.rgbEncoder.add(frame: VideoEncoderInput(buffer: frame.capturedImage, time: frame.timestamp), currentFrame: totalFrames)
             self.odometryEncoder.add(frame: frame, currentFrame: frameNumber)
             self.distortionEncoder.add(frame: frame, currentFrame: frameNumber)
+            self.exposureEncoder.add(frame: frame, currentFrame: frameNumber, snapshot: exposureSnapshot)
             self.lastFrame = frame
         }
     }
@@ -140,6 +163,7 @@ class DatasetEncoder {
         self.imuEncoder.done()
         self.odometryEncoder.done()
         self.distortionEncoder.done()
+        self.exposureEncoder.done()
         writeIntrinsics()
         switch self.rgbEncoder.status {
             case .allGood:

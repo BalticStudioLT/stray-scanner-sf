@@ -40,6 +40,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var datasetEncoder: DatasetEncoder?
     private let imuOperationQueue = OperationQueue()
     private var chosenFpsSetting: Int = 0
+    private let exposureController = ExposureController()
+    private var chosenShutterSetting: ShutterSetting = ShutterSetting.defaultSetting
+    private let shutterButton = UIButton(type: .system)
     @IBOutlet private var rgbView: MetalView!
     @IBOutlet private var depthView: MetalView!
     @IBOutlet private var recordButton: RecordButton!
@@ -53,6 +56,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     override func viewWillAppear(_ animated: Bool) {
         self.chosenFpsSetting = UserDefaults.standard.integer(forKey: FpsUserDefaultsKey)
         updateFpsSetting()
+        self.chosenShutterSetting = ShutterSetting.load()
+        updateShutterButton()
     }
 
     override func viewDidLoad() {
@@ -71,6 +76,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         fpsButton.layer.masksToBounds = true
         fpsButton.layer.cornerRadius = 12.0
+        setUpShutterButton()
         
         imuOperationQueue.qualityOfService = .userInitiated
     }
@@ -97,6 +103,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         } else {
             config.frameSemantics.insert(.sceneDepth)
             session.run(config)
+            // Apply the shutter after the session has configured the camera.
+            exposureController.apply(chosenShutterSetting)
         }
     }
     
@@ -163,7 +171,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             self.updateTime()
         }
-        datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting])
+        exposureController.lockForRecording()
+        shutterButton.isEnabled = false
+        fpsButton.isEnabled = false
+        datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting], exposureController: exposureController)
+        datasetEncoder?.writeCaptureSettings(exposureController.captureSettings())
         startRawIMU()
     }
 
@@ -178,6 +190,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         // Stop IMU updates
         stopRawIMU()
         datasetEncoder?.wrapUp()
+        exposureController.unlockAfterRecording()
+        shutterButton.isEnabled = true
+        fpsButton.isEnabled = true
         if let encoder = datasetEncoder {
             switch encoder.status {
                 case .allGood:
@@ -248,6 +263,42 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         chosenFpsSetting = (chosenFpsSetting + 1) % AvailableFpsSettings.count
         updateFpsSetting()
         UserDefaults.standard.set(chosenFpsSetting, forKey: FpsUserDefaultsKey)
+    }
+
+    @objc func shutterButtonTapped() {
+        let all = ShutterSetting.allCases
+        let index = all.firstIndex(of: chosenShutterSetting) ?? 0
+        chosenShutterSetting = all[(index + 1) % all.count]
+        chosenShutterSetting.save()
+        updateShutterButton()
+        exposureController.apply(chosenShutterSetting)
+    }
+
+    private func setUpShutterButton() {
+        shutterButton.translatesAutoresizingMaskIntoConstraints = false
+        shutterButton.backgroundColor = fpsButton.backgroundColor
+        shutterButton.tintColor = fpsButton.tintColor
+        shutterButton.titleLabel?.font = fpsButton.titleLabel?.font
+        shutterButton.layer.masksToBounds = true
+        shutterButton.layer.cornerRadius = 12.0
+        shutterButton.addTarget(self, action: #selector(shutterButtonTapped), for: .touchUpInside)
+        shutterButton.accessibilityLabel = "Shutter speed"
+        view.addSubview(shutterButton)
+        NSLayoutConstraint.activate([
+            shutterButton.leadingAnchor.constraint(equalTo: fpsButton.trailingAnchor, constant: 8),
+            shutterButton.centerYAnchor.constraint(equalTo: fpsButton.centerYAnchor),
+            shutterButton.heightAnchor.constraint(equalTo: fpsButton.heightAnchor),
+            shutterButton.widthAnchor.constraint(greaterThanOrEqualTo: fpsButton.widthAnchor),
+        ])
+        if !exposureController.isAvailable {
+            shutterButton.isEnabled = false
+        }
+    }
+
+    private func updateShutterButton() {
+        let label = exposureController.isAvailable ? chosenShutterSetting.label : ShutterSetting.auto.label
+        let title = label == "Auto" ? "Auto exp" : "\(label) s"
+        shutterButton.setTitle(title, for: .normal)
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
