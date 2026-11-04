@@ -70,6 +70,8 @@ final class ExposureController {
     private(set) var setting: ShutterSetting = .auto
     private(set) var isCaptureLocked: Bool = false
     private var isoTimer: Timer?
+    /// Keep ISO fixed (used while the torch alternates, so both light setups get the same exposure).
+    var freezeISO: Bool = false
 
     /// Smallest metered error (in EV) the ISO loop reacts to, and the fraction of it corrected per step.
     private let isoDeadband: Float = 0.15
@@ -135,6 +137,7 @@ final class ExposureController {
             return
         }
 
+        if freezeISO { return }
         let offset = device.exposureTargetOffset // EV; positive = brighter than target
         guard offset.isFinite, abs(offset) > isoDeadband else { return }
         let newISO = device.iso * powf(2.0, -offset * isoGain)
@@ -156,6 +159,24 @@ final class ExposureController {
         if CMTimeCompare(duration, format.minExposureDuration) < 0 { return format.minExposureDuration }
         if CMTimeCompare(duration, format.maxExposureDuration) > 0 { return format.maxExposureDuration }
         return duration
+    }
+
+    // MARK: - Torch
+
+    var hasTorch: Bool { return device?.hasTorch ?? false }
+
+    /// Actual torch brightness 0…1 (it ramps, so this lags a switch by a few frames).
+    var torchLevel: Float { return device?.torchLevel ?? 0 }
+
+    func setTorch(on: Bool) {
+        guard let device = device, device.hasTorch else { return }
+        withLockedDevice(device) {
+            if on {
+                try? device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+            } else if device.isTorchModeSupported(.off) {
+                device.torchMode = .off
+            }
+        }
     }
 
     // MARK: - White balance / focus lock while recording

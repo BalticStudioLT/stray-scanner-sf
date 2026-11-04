@@ -26,6 +26,7 @@ exposure.csv         (stray-scanner-sf fork only)
 capture_settings.json (stray-scanner-sf fork only)
 frame_quality.csv    (stray-scanner-sf fork only)
 markers.csv          (stray-scanner-sf fork only, present when pins were set)
+worldmap.arexperience (stray-scanner-sf fork only, ARKit map of the room, saved every 20 s)
 ```
 
 `rgb.mp4` is an HEVC encoded video, which contains the recorded data from the iPhone's camera.
@@ -121,6 +122,7 @@ Note: with a fixed shutter the ISO is still adjusted automatically while recordi
 | est_blur_px | Estimated motion blur in pixels of the full-size image: (rotation speed × focal length + speed × focal length / subject distance) × exposure time. Under 1.5 px is sharp, over 3 px is visibly blurred |
 | median_depth_m | Median LiDAR depth of the central half of the image (0 = unknown, updated every 4th camera frame) |
 | depth_confident_fraction | Share of LiDAR pixels with high confidence (0–1) |
+| torch_level | Phone light brightness 0–1 as reported by the camera (it ramps, so it lags a switch by a few frames). With the light set to alternate, frames split into a lit and an unlit set |
 
 `markers.csv` lists the points the user pinned with the pin button while recording, e.g. stops for a guided tour:
 
@@ -130,3 +132,9 @@ Note: with a fixed shutter the ISO is still adjusted automatically while recordi
 | timestamp | Time of the pin (same clock as `odometry.csv`) |
 | frame | Last saved frame number when the pin was set |
 | x, y, z, qx, qy, qz, qw | Camera pose at that moment, same convention as `odometry.csv` |
+
+## Crash safety and continuing a scan (stray-scanner-sf fork)
+
+- `rgb.mp4` is written as a fragmented MP4 (1 s fragments). If the app is killed while recording (e.g. the phone overheats), the video stays playable up to the last fragment, and the CSV/PNG files are complete up to the last saved frame. On the next launch such a scan appears in the list as "Recovered scan".
+- `worldmap.arexperience` is ARKit's map of the room (`ARWorldMap`, NSKeyedArchiver), saved every 20 s and at the end. "Continue" on a scan starts a new recording that relocalizes in that map, so its `odometry.csv` poses are in the **same coordinate system** as the earlier scan. Its `capture_settings.json` then contains `"continues_scan": "<folder of the earlier scan>"` and `"relocalized_at_start"`. Start recording after the advice banner stops saying "Continuing: point at the area you scanned last".
+- `capture_settings.json` also records `"torch_mode"`: `off`, `on` or `alternate_1s`.

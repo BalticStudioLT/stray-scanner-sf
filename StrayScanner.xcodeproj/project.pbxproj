@@ -62,6 +62,8 @@
 		38694C8326D2C66F00546EA1 /* AppDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38694C7326D2C66F00546EA1 /* AppDaemon.swift */; };
 		70D1234B2E1800000027BEEF /* DistortionEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1234A2E1800000027BEEF /* DistortionEncoder.swift */; };
 		70D1234C2E1800000027BEEF /* DistortionEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1234A2E1800000027BEEF /* DistortionEncoder.swift */; };
+		70D127FB2E1800000027BEEF /* WallSweepGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D127FA2E1800000027BEEF /* WallSweepGuide.swift */; };
+		70D127FC2E1800000027BEEF /* WallSweepGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D127FA2E1800000027BEEF /* WallSweepGuide.swift */; };
 		70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
 		70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
 		70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */; };
@@ -132,6 +134,7 @@
 		70D1271A2E1800000027BEEF /* ScanRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRenderer.swift; sourceTree = "<group>"; };
 		70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanQualityMonitor.swift; sourceTree = "<group>"; };
 		70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameQualityEncoder.swift; sourceTree = "<group>"; };
+		70D127FA2E1800000027BEEF /* WallSweepGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallSweepGuide.swift; sourceTree = "<group>"; };
 		70D1234A2E1800000027BEEF /* DistortionEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DistortionEncoder.swift; sourceTree = "<group>"; };
 		386E277725991163007D023B /* RecordButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordButton.swift; sourceTree = "<group>"; };
 		3872B88825962BBA00A3370C /* Colors.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Colors.xcassets; sourceTree = "<group>"; };
@@ -285,6 +288,7 @@
 				38694C7126D2C66F00546EA1 /* OdometryEncoder.swift */,
 				38694C7226D2C66F00546EA1 /* DepthEncoder.swift */,
 				70D1234A2E1800000027BEEF /* DistortionEncoder.swift */,
+				70D127FA2E1800000027BEEF /* WallSweepGuide.swift */,
 				70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */,
 				70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */,
 				70D1271A2E1800000027BEEF /* ScanRenderer.swift */,
@@ -558,6 +562,7 @@
 				709259192E0B79AB00A7B62E /* ShareUtility.swift in Sources */,
 				38694C8026D2C66F00546EA1 /* DepthEncoder.swift in Sources */,
 				70D1234B2E1800000027BEEF /* DistortionEncoder.swift in Sources */,
+				70D127FB2E1800000027BEEF /* WallSweepGuide.swift in Sources */,
 				70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
 				70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
 				70D1271B2E1800000027BEEF /* ScanRenderer.swift in Sources */,
@@ -598,6 +603,7 @@
 				70CF35492E17803700276207 /* ShareUtility.swift in Sources */,
 				38694C8126D2C66F00546EA1 /* DepthEncoder.swift in Sources */,
 				70D1234C2E1800000027BEEF /* DistortionEncoder.swift in Sources */,
+				70D127FC2E1800000027BEEF /* WallSweepGuide.swift in Sources */,
 				70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
 				70D1272C2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
 				70D1271C2E1800000027BEEF /* ScanRenderer.swift in Sources */,

@@ -56,9 +56,9 @@ enum ViewMode: Int, CaseIterable {
 private struct PointCloudUniforms {
     var viewProjection: simd_float4x4
     var pointScale: Float
+    var clipY: Float = .greatestFiniteMagnitude
+    var maxPointSize: Float = 12
     var pad0: Float = 0
-    var pad1: Float = 0
-    var pad2: Float = 0
 }
 
 private let quadVertices: [Float] = [
@@ -86,6 +86,21 @@ final class ScanRenderer {
     var mode: ViewMode = .camera
     /// Point cloud seen from behind and above the phone (true) or through the camera (false).
     var chaseCamera: Bool = true
+    /// Colour the point cloud by how many directions each spot was filmed from.
+    var showCoverage: Bool = false
+    /// Hide points more than this far above the phone in the overview and minimap (cuts the ceiling away).
+    var ceilingCut: Float = 0.3
+    /// Small extra views; nil = hidden.
+    var cameraInsetLayer: CAMetalLayer?
+    var depthInsetLayer: CAMetalLayer?
+    var minimapLayer: CAMetalLayer?
+    /// Path-guide stripes to draw (world space).
+    var guideVertices: [PointCloudVertex] = []
+    /// Lighter rendering when the phone is hot.
+    var lowPower: Bool = false {
+        didSet { pointCloud.lowPower = lowPower }
+    }
+    private var frameNumber = 0
 
     private let layer: CAMetalLayer
     private let device: MTLDevice
@@ -95,8 +110,11 @@ final class ScanRenderer {
     private let depthPipeline: MTLRenderPipelineState
     private let overlayPipeline: MTLRenderPipelineState
     private let pointPipeline: MTLRenderPipelineState
+    private let flatPointPipeline: MTLRenderPipelineState
+    private let guideBuffer: MTLBuffer
+    private let guideCapacity = 4096
     private let depthStencilState: MTLDepthStencilState
-    private var depthAttachment: MTLTexture?
+    private var depthAttachments: [Int: MTLTexture] = [:]
     private var textureCache: CVMetalTextureCache
     private var clearedForDim = false
 
@@ -138,6 +156,8 @@ final class ScanRenderer {
         pointDescriptor.vertexFunction = library.makeFunction(name: "pointCloudVertex")
         pointDescriptor.fragmentFunction = library.makeFunction(name: "pointCloudFragment")
         pointDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        // Same shaders without a depth buffer, for guide stripes drawn over the camera image.
+        let flatDescriptor = pointDescriptor.copy() as! MTLRenderPipelineDescriptor
         pointDescriptor.depthAttachmentPixelFormat = .depth32Float
 
         let depthStateDescriptor = MTLDepthStencilDescriptor()
@@ -148,6 +168,8 @@ final class ScanRenderer {
               let depth = quadPipeline("depthColorFragment"),
               let overlay = quadPipeline("overlayFragment"),
               let points = try? device.makeRenderPipelineState(descriptor: pointDescriptor),
+              let flatPoints = try? device.makeRenderPipelineState(descriptor: flatDescriptor),
+              let guideBuffer = device.makeBuffer(length: 4096 * MemoryLayout<PointCloudVertex>.stride, options: .storageModeShared),
               let depthState = device.makeDepthStencilState(descriptor: depthStateDescriptor) else { return nil }
 
         self.layer = layer
@@ -158,76 +180,59 @@ final class ScanRenderer {
         self.depthPipeline = depth
         self.overlayPipeline = overlay
         self.pointPipeline = points
+        self.flatPointPipeline = flatPoints
+        self.guideBuffer = guideBuffer
         self.depthStencilState = depthState
         self.textureCache = textureCache
         self.pointCloud = pointCloud
     }
 
     func render(frame: ARFrame) {
+        frameNumber += 1
         // Always grow the point cloud so switching to it shows the whole scan so far.
         pointCloud.add(frame: frame)
+        uploadGuides()
+        if lowPower && frameNumber % 2 == 0 { return }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        var keepAlive: [CVMetalTexture] = []
+        var drawables: [CAMetalDrawable] = []
+        let textures = FrameTextures(frame: frame, renderer: self, keepAlive: &keepAlive)
 
         if mode == .dim {
-            if !clearedForDim { clear() }
+            if !clearedForDim, let drawable = layer.nextDrawable() {
+                encodeClear(commandBuffer, drawable: drawable)
+                drawables.append(drawable)
+            }
             clearedForDim = true
-            return
-        }
-        clearedForDim = false
-
-        guard layer.drawableSize.width > 0, let drawable = layer.nextDrawable(),
-              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
-        var keepAlive: [CVMetalTexture] = []
-
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1.0)
-
-        if mode == .pointCloud {
-            pass.depthAttachment.texture = depthTexture(for: drawable.texture)
-            pass.depthAttachment.loadAction = .clear
-            pass.depthAttachment.storeAction = .dontCare
-            pass.depthAttachment.clearDepth = 1.0
-        }
-
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
-        encoder.setCullMode(.none)
-
-        switch mode {
-        case .camera:
-            if let y = texture(frame.capturedImage, .r8Unorm, 0, &keepAlive),
-               let cbcr = texture(frame.capturedImage, .rg8Unorm, 1, &keepAlive) {
-                encoder.setRenderPipelineState(cameraPipeline)
-                encoder.setFragmentTexture(y, index: 0)
-                encoder.setFragmentTexture(cbcr, index: 1)
-                drawQuad(encoder)
+        } else {
+            clearedForDim = false
+            if layer.drawableSize.width > 0, let drawable = layer.nextDrawable() {
+                encodeMain(commandBuffer, drawable: drawable, frame: frame, textures: textures)
+                drawables.append(drawable)
             }
-        case .depth, .overlay:
-            if let sceneDepth = frame.sceneDepth, let confidenceMap = sceneDepth.confidenceMap,
-               let depth = texture(sceneDepth.depthMap, .r32Float, 0, &keepAlive),
-               let confidence = texture(confidenceMap, .r8Unorm, 0, &keepAlive) {
-                encoder.setFragmentTexture(depth, index: 2)
-                encoder.setFragmentTexture(confidence, index: 3)
-                if mode == .overlay,
-                   let y = texture(frame.capturedImage, .r8Unorm, 0, &keepAlive),
-                   let cbcr = texture(frame.capturedImage, .rg8Unorm, 1, &keepAlive) {
-                    encoder.setRenderPipelineState(overlayPipeline)
-                    encoder.setFragmentTexture(y, index: 0)
-                    encoder.setFragmentTexture(cbcr, index: 1)
-                } else {
-                    encoder.setRenderPipelineState(depthPipeline)
-                }
-                drawQuad(encoder)
-            }
-        case .pointCloud:
-            drawPointCloud(encoder, frame: frame, drawableSize: layer.drawableSize)
-        case .dim:
-            break
         }
 
-        encoder.endEncoding()
-        commandBuffer.present(drawable)
+        // Small views refresh at 30 fps (15 fps when hot) to save power.
+        let insetInterval = lowPower ? 4 : 2
+        if frameNumber % insetInterval == 0 {
+            if let inset = cameraInsetLayer, let drawable = inset.nextDrawable() {
+                encodeQuad(commandBuffer, drawable: drawable, pipeline: cameraPipeline, textures: textures, needsCamera: true, needsDepth: false)
+                drawables.append(drawable)
+            }
+            if let inset = depthInsetLayer, let drawable = inset.nextDrawable() {
+                encodeQuad(commandBuffer, drawable: drawable, pipeline: depthPipeline, textures: textures, needsCamera: false, needsDepth: true)
+                drawables.append(drawable)
+            }
+            if let minimap = minimapLayer, let drawable = minimap.nextDrawable() {
+                encodeMinimap(commandBuffer, drawable: drawable, frame: frame, size: minimap.drawableSize)
+                drawables.append(drawable)
+            }
+        }
+
+        for drawable in drawables {
+            commandBuffer.present(drawable)
+        }
         let retainedTextures = keepAlive
         commandBuffer.addCompletedHandler { _ in
             // Keep the CoreVideo textures alive until the GPU is done with them.
@@ -236,8 +241,133 @@ final class ScanRenderer {
         commandBuffer.commit()
     }
 
+    var metalDevice: MTLDevice { return device }
+
     func resetPointCloud() {
         pointCloud.reset()
+    }
+
+    // MARK: - Passes
+
+    fileprivate struct FrameTextures {
+        var y: MTLTexture?
+        var cbcr: MTLTexture?
+        var depth: MTLTexture?
+        var confidence: MTLTexture?
+
+        init(frame: ARFrame, renderer: ScanRenderer, keepAlive: inout [CVMetalTexture]) {
+            y = renderer.texture(frame.capturedImage, .r8Unorm, 0, &keepAlive)
+            cbcr = renderer.texture(frame.capturedImage, .rg8Unorm, 1, &keepAlive)
+            if let sceneDepth = frame.sceneDepth, let confidenceMap = sceneDepth.confidenceMap {
+                depth = renderer.texture(sceneDepth.depthMap, .r32Float, 0, &keepAlive)
+                confidence = renderer.texture(confidenceMap, .r8Unorm, 0, &keepAlive)
+            }
+        }
+    }
+
+    private func colorPass(_ drawable: CAMetalDrawable, withDepth: Bool) -> MTLRenderPassDescriptor {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1.0)
+        if withDepth {
+            pass.depthAttachment.texture = depthTexture(for: drawable.texture)
+            pass.depthAttachment.loadAction = .clear
+            pass.depthAttachment.storeAction = .dontCare
+            pass.depthAttachment.clearDepth = 1.0
+        }
+        return pass
+    }
+
+    private func encodeMain(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable, frame: ARFrame, textures: FrameTextures) {
+        let size = layer.drawableSize
+        switch mode {
+        case .camera, .overlay, .depth:
+            let pipeline = mode == .camera ? cameraPipeline : (mode == .overlay ? overlayPipeline : depthPipeline)
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: colorPass(drawable, withDepth: false)) else { return }
+            encoder.setCullMode(.none)
+            if bindQuadTextures(encoder, textures: textures, needsCamera: mode != .depth, needsDepth: mode != .camera) {
+                encoder.setRenderPipelineState(pipeline)
+                drawQuad(encoder)
+            }
+            // Path-guide stripes over the live picture.
+            if !guideVertices.isEmpty && mode != .depth {
+                let view = frame.camera.viewMatrix(for: .portrait)
+                let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: size, zNear: 0.02, zFar: 50)
+                var uniforms = PointCloudUniforms(viewProjection: projection * view,
+                                                  pointScale: Float(size.height) * 0.5 * projection.columns.1.y)
+                encoder.setRenderPipelineState(flatPointPipeline)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 1)
+                drawGuides(encoder)
+            }
+            encoder.endEncoding()
+        case .pointCloud:
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: colorPass(drawable, withDepth: true)) else { return }
+            encoder.setCullMode(.none)
+            drawPointCloud(encoder, frame: frame, drawableSize: size)
+            encoder.endEncoding()
+        case .dim:
+            break
+        }
+    }
+
+    private func encodeQuad(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable, pipeline: MTLRenderPipelineState,
+                            textures: FrameTextures, needsCamera: Bool, needsDepth: Bool) {
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: colorPass(drawable, withDepth: false)) else { return }
+        encoder.setCullMode(.none)
+        if bindQuadTextures(encoder, textures: textures, needsCamera: needsCamera, needsDepth: needsDepth) {
+            encoder.setRenderPipelineState(pipeline)
+            drawQuad(encoder)
+        }
+        encoder.endEncoding()
+    }
+
+    private func encodeClear(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable) {
+        let pass = colorPass(drawable, withDepth: false)
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        commandBuffer.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+    }
+
+    /// Top-down map centred on the phone, phone heading pointing up, ceiling cut away.
+    private func encodeMinimap(_ commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable, frame: ARFrame, size: CGSize) {
+        guard size.width > 0, let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: colorPass(drawable, withDepth: true)) else { return }
+        encoder.setCullMode(.none)
+        let t = frame.camera.transform
+        let position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        let forward = -SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z)
+        var flat = SIMD3<Float>(forward.x, 0, forward.z)
+        flat = simd_length(flat) > 0.05 ? simd_normalize(flat) : SIMD3<Float>(0, 0, -1)
+        let view = ScanRenderer.lookAt(eye: position + SIMD3<Float>(0, 10, 0), target: position, up: flat)
+        let halfSize: Float = 3.5
+        let aspect = Float(size.width / max(size.height, 1))
+        let projection = ScanRenderer.orthographic(halfWidth: halfSize * aspect, halfHeight: halfSize, near: 0.1, far: 30)
+        var uniforms = PointCloudUniforms(viewProjection: projection * view,
+                                          pointScale: Float(size.height) * 0.5 * projection.columns.1.y,
+                                          clipY: position.y + ceilingCut,
+                                          maxPointSize: 8)
+        encoder.setRenderPipelineState(pointPipeline)
+        encoder.setDepthStencilState(depthStencilState)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 1)
+        drawCloud(encoder)
+        drawGuides(encoder)
+        drawPhoneMarker(encoder, position: position)
+        encoder.endEncoding()
+    }
+
+    @discardableResult
+    private func bindQuadTextures(_ encoder: MTLRenderCommandEncoder, textures: FrameTextures, needsCamera: Bool, needsDepth: Bool) -> Bool {
+        if needsCamera {
+            guard let y = textures.y, let cbcr = textures.cbcr else { return false }
+            encoder.setFragmentTexture(y, index: 0)
+            encoder.setFragmentTexture(cbcr, index: 1)
+        }
+        if needsDepth {
+            guard let depth = textures.depth, let confidence = textures.confidence else { return false }
+            encoder.setFragmentTexture(depth, index: 2)
+            encoder.setFragmentTexture(confidence, index: 3)
+        }
+        return true
     }
 
     // MARK: - Drawing
@@ -248,58 +378,83 @@ final class ScanRenderer {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
+    private var guideCount = 0
+
+    private func uploadGuides() {
+        let count = min(guideVertices.count, guideCapacity)
+        if count > 0 {
+            let pointer = guideBuffer.contents().bindMemory(to: PointCloudVertex.self, capacity: guideCapacity)
+            for i in 0..<count { pointer[i] = guideVertices[i] }
+        }
+        guideCount = count
+    }
+
+    private func drawGuides(_ encoder: MTLRenderCommandEncoder) {
+        guard guideCount > 0 else { return }
+        encoder.setVertexBuffer(guideBuffer, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: guideCount)
+    }
+
+    private func drawCloud(_ encoder: MTLRenderCommandEncoder) {
+        if showCoverage {
+            if pointCloud.coverageCount > 0 {
+                encoder.setVertexBuffer(pointCloud.coverageBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: pointCloud.coverageCount)
+            }
+        } else if pointCloud.count > 0 {
+            encoder.setVertexBuffer(pointCloud.buffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: pointCloud.count)
+        }
+    }
+
+    private func drawPhoneMarker(_ encoder: MTLRenderCommandEncoder, position: SIMD3<Float>) {
+        var marker = PointCloudVertex(position: SIMD4<Float>(position.x, position.y - 0.05, position.z, 0.25),
+                                      color: SIMD4<Float>(1, 1, 1, 1))
+        encoder.setVertexBytes(&marker, length: MemoryLayout<PointCloudVertex>.stride, index: 0)
+        encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+    }
+
     private func drawPointCloud(_ encoder: MTLRenderCommandEncoder, frame: ARFrame, drawableSize: CGSize) {
         let aspect = Float(drawableSize.width / max(drawableSize.height, 1))
         let projection: simd_float4x4
         let view: simd_float4x4
+        let t = frame.camera.transform
+        let position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        var clipY = Float.greatestFiniteMagnitude
         if chaseCamera {
-            let t = frame.camera.transform
-            let position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
             let forward = -simd_normalize(SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z))
             var flat = SIMD3<Float>(forward.x, 0, forward.z)
             flat = simd_length(flat) > 0.05 ? simd_normalize(flat) : SIMD3<Float>(0, 0, -1)
-            let eye = position - flat * 1.6 + SIMD3<Float>(0, 1.1, 0)
+            let eye = position - flat * 1.8 + SIMD3<Float>(0, 1.3, 0)
             let target = position + forward * 1.0
             view = ScanRenderer.lookAt(eye: eye, target: target, up: SIMD3<Float>(0, 1, 0))
             projection = ScanRenderer.perspective(fovY: Float(65.0 * Double.pi / 180.0), aspect: aspect, near: 0.05, far: 50)
+            // Cut the ceiling away so it doesn't block the overview.
+            clipY = position.y + ceilingCut
         } else {
             view = frame.camera.viewMatrix(for: .portrait)
             projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: drawableSize, zNear: 0.02, zFar: 50)
         }
         var uniforms = PointCloudUniforms(viewProjection: projection * view,
-                                          pointScale: Float(drawableSize.height) * 0.5 * projection.columns.1.y)
+                                          pointScale: Float(drawableSize.height) * 0.5 * projection.columns.1.y,
+                                          clipY: clipY,
+                                          maxPointSize: showCoverage ? 18 : 10)
         encoder.setRenderPipelineState(pointPipeline)
         encoder.setDepthStencilState(depthStencilState)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 1)
-
-        if pointCloud.count > 0 {
-            encoder.setVertexBuffer(pointCloud.buffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: pointCloud.count)
-        }
+        drawCloud(encoder)
+        drawGuides(encoder)
         if chaseCamera {
-            // Current phone position as a large white dot.
-            let t = frame.camera.transform
-            var marker = PointCloudVertex(position: SIMD4<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z, 0.08),
+            var marker = PointCloudVertex(position: SIMD4<Float>(position.x, position.y, position.z, 0.08),
                                           color: SIMD4<Float>(1, 1, 1, 1))
             encoder.setVertexBytes(&marker, length: MemoryLayout<PointCloudVertex>.stride, index: 0)
             encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
         }
     }
 
-    private func clear() {
-        guard let drawable = layer.nextDrawable(), let commandBuffer = commandQueue.makeCommandBuffer() else { return }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        commandBuffer.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
-        commandBuffer.present(drawable)
-        commandBuffer.commit()
-    }
-
     private func depthTexture(for target: MTLTexture) -> MTLTexture? {
-        if let existing = depthAttachment, existing.width == target.width, existing.height == target.height {
+        let key = (target.width << 16) | target.height
+        if let existing = depthAttachments[key] {
             return existing
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float,
@@ -308,11 +463,12 @@ final class ScanRenderer {
                                                                   mipmapped: false)
         descriptor.usage = .renderTarget
         descriptor.storageMode = .private
-        depthAttachment = device.makeTexture(descriptor: descriptor)
-        return depthAttachment
+        let texture = device.makeTexture(descriptor: descriptor)
+        depthAttachments[key] = texture
+        return texture
     }
 
-    private func texture(_ pixelBuffer: CVPixelBuffer, _ format: MTLPixelFormat, _ plane: Int,
+    fileprivate func texture(_ pixelBuffer: CVPixelBuffer, _ format: MTLPixelFormat, _ plane: Int,
                          _ keepAlive: inout [CVMetalTexture]) -> MTLTexture? {
         let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, plane)
         let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, plane)
@@ -337,6 +493,15 @@ final class ScanRenderer {
             SIMD4<Float>(x.y, y.y, z.y, 0),
             SIMD4<Float>(x.z, y.z, z.z, 0),
             SIMD4<Float>(-simd_dot(x, eye), -simd_dot(y, eye), -simd_dot(z, eye), 1)
+        ))
+    }
+
+    static func orthographic(halfWidth: Float, halfHeight: Float, near: Float, far: Float) -> simd_float4x4 {
+        return simd_float4x4(columns: (
+            SIMD4<Float>(1 / halfWidth, 0, 0, 0),
+            SIMD4<Float>(0, 1 / halfHeight, 0, 0),
+            SIMD4<Float>(0, 0, 1 / (near - far), 0),
+            SIMD4<Float>(0, 0, near / (near - far), 1)
         ))
     }
 

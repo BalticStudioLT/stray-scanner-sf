@@ -103,6 +103,14 @@ struct SessionDetailView: View {
                 .glassButton(prominent: true)
                 .disabled(isCreatingPackage)
 
+                if let folder = recording.directoryPath(),
+                   FileManager.default.fileExists(atPath: folder.appendingPathComponent(DatasetEncoder.worldMapFileName).path) {
+                    NavigationLink(destination: NewSessionView(continueFrom: folder)) {
+                        Label("Continue", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .glassButton()
+                }
+
                 Button(role: .destructive, action: deleteItem) {
                     Label("Delete", systemImage: "trash")
                 }

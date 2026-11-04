@@ -137,9 +137,9 @@ struct SFPointVertex {
 struct SFPointUniforms {
     float4x4 viewProjection;
     float pointScale;   // pixels per metre at 1 m distance
+    float clipY;        // points above this world height are hidden (ceiling cut)
+    float maxPointSize; // pixels
     float pad0;
-    float pad1;
-    float pad2;
 };
 
 struct SFPointOut {
@@ -153,11 +153,16 @@ vertex SFPointOut pointCloudVertex(const device SFPointVertex* points [[ buffer(
                                    uint vertexIndex [[ vertex_id ]]) {
     SFPointVertex p = points[vertexIndex];
     SFPointOut out;
+    out.color = p.color;
+    if (p.position.y > uniforms.clipY) {
+        out.position = float4(2.0, 2.0, 2.0, 1.0); // outside the clip volume: culled
+        out.pointSize = 1.0;
+        return out;
+    }
     float4 clip = uniforms.viewProjection * float4(p.position.xyz, 1.0);
     out.position = clip;
     float distance = max(clip.w, 0.05);
-    out.pointSize = clamp(p.position.w * uniforms.pointScale / distance, 1.0, 32.0);
-    out.color = p.color;
+    out.pointSize = clamp(p.position.w * uniforms.pointScale / distance, 1.0, uniforms.maxPointSize);
     return out;
 }
 

@@ -20,6 +20,7 @@ struct FrameQuality {
     let blurPixels: Float         // estimated motion blur in pixels of the full-size image
     let medianDepth: Float        // m, 0 if unknown
     let depthConfidentFraction: Float // share of LiDAR pixels with high confidence
+    var torchLevel: Float = 0     // phone torch brightness 0…1
 }
 
 struct ScanAdvice: Equatable {

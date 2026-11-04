@@ -56,6 +56,9 @@ class VideoEncoder {
     private func initializeFile() {
         do {
             videoWriter = try AVAssetWriter(outputURL: self.filePath, fileType: .mp4)
+            // stray-scanner-sf: write the movie in 1 s fragments so the video stays playable
+            // up to the last fragment if the app is killed (e.g. by overheating) mid-recording.
+            videoWriter?.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
             let settings: [String : Any] = [
                 AVVideoCodecKey: AVVideoCodecType.hevc,
                 AVVideoWidthKey: self.width,

@@ -25,12 +25,21 @@ final class PointCloudAccumulator {
     private(set) var count: Int = 0
     private var writeIndex: Int = 0
     private var fineVoxels = Set<Int64>()
-    private var areaVoxels = Set<Int64>()
+
+    /// Coverage: one point per 10 cm voxel, coloured by how many different directions it was seen from.
+    let coverageCapacity: Int = 400_000
+    let coverageBuffer: MTLBuffer
+    private(set) var coverageCount: Int = 0
+    private var coverageSlots: [Int64: Int32] = [:]
+    private var coverageMasks: [UInt16] = []
+    private(set) var wellCoveredVoxels: Int = 0
+    /// Every Nth sample is skipped when the phone is hot.
+    var lowPower: Bool = false
     private var lastSampledTransform: simd_float4x4?
     private var lastTrajectoryPoint: SIMD3<Float>?
     private var frameCounter: Int = 0
 
-    private let pointSize: Float = 0.014
+    private let pointSize: Float = 0.009
     private let fineVoxelSize: Float = 0.02
     private let areaVoxelSize: Float = 0.10
     private let pixelStride: Int = 3
@@ -38,21 +47,32 @@ final class PointCloudAccumulator {
 
     init?(device: MTLDevice, capacity: Int = 1_200_000) {
         let length = capacity * MemoryLayout<PointCloudVertex>.stride
-        guard let buffer = device.makeBuffer(length: length, options: .storageModeShared) else { return nil }
+        guard let buffer = device.makeBuffer(length: length, options: .storageModeShared),
+              let coverageBuffer = device.makeBuffer(length: 400_000 * MemoryLayout<PointCloudVertex>.stride, options: .storageModeShared) else { return nil }
         self.capacity = capacity
         self.buffer = buffer
+        self.coverageBuffer = coverageBuffer
+        coverageMasks.reserveCapacity(coverageCapacity)
     }
 
     /// Approximate scanned surface in square metres.
     var surfaceArea: Float {
-        return Float(areaVoxels.count) * areaVoxelSize * areaVoxelSize
+        return Float(coverageCount) * areaVoxelSize * areaVoxelSize
+    }
+
+    /// Share of the scanned surface seen from at least 3 different directions.
+    var wellCoveredFraction: Float {
+        return coverageCount > 0 ? Float(wellCoveredVoxels) / Float(coverageCount) : 0
     }
 
     func reset() {
         count = 0
         writeIndex = 0
         fineVoxels.removeAll(keepingCapacity: true)
-        areaVoxels.removeAll(keepingCapacity: true)
+        coverageSlots.removeAll(keepingCapacity: true)
+        coverageMasks.removeAll(keepingCapacity: true)
+        coverageCount = 0
+        wellCoveredVoxels = 0
         lastSampledTransform = nil
         lastTrajectoryPoint = nil
     }
@@ -64,7 +84,7 @@ final class PointCloudAccumulator {
         let transform = frame.camera.transform
         addTrajectoryPoint(transform: transform)
 
-        if frameCounter % 3 != 0 { return }
+        if frameCounter % (lowPower ? 8 : 3) != 0 { return }
         if let last = lastSampledTransform, !movedEnough(from: last, to: transform) { return }
         guard let sceneDepth = frame.sceneDepth, let confidenceMap = sceneDepth.confidenceMap else { return }
         lastSampledTransform = transform
@@ -84,7 +104,7 @@ final class PointCloudAccumulator {
         let p = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
         if let last = lastTrajectoryPoint, simd_distance(last, p) < 0.05 { return }
         lastTrajectoryPoint = p
-        append(PointCloudVertex(position: SIMD4<Float>(p.x, p.y, p.z, 0.03),
+        append(PointCloudVertex(position: SIMD4<Float>(p.x, p.y, p.z, 0.02),
                                 color: SIMD4<Float>(0.25, 0.9, 1.0, 1.0)))
     }
 
@@ -137,6 +157,7 @@ final class PointCloudAccumulator {
         let cx = intrinsics.columns.2.x * sx
         let cy = intrinsics.columns.2.y * sy
         let transform = frame.camera.transform
+        let cameraPosition = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
         let imageScaleX = Float(imageWidth) / Float(depthWidth)
         let imageScaleY = Float(imageHeight) / Float(depthHeight)
 
@@ -157,8 +178,8 @@ final class PointCloudAccumulator {
                 let local = SIMD4<Float>((Float(u) - cx) / fx * d, -(Float(v) - cy) / fy * d, -d, 1.0)
                 let world4 = transform * local
                 let world = SIMD3<Float>(world4.x, world4.y, world4.z)
+                updateCoverage(world, cameraPosition: cameraPosition)
                 guard fineVoxels.insert(voxelKey(world, size: fineVoxelSize)).inserted else { continue }
-                areaVoxels.insert(voxelKey(world, size: areaVoxelSize))
 
                 let iu = min(Int(Float(u) * imageScaleX), imageWidth - 1)
                 let iv = min(Int(Float(v) * imageScaleY), imageHeight - 1)
@@ -173,6 +194,47 @@ final class PointCloudAccumulator {
                                         color: SIMD4<Float>(r, g, b, 1.0)))
             }
             v += pixelStride
+        }
+    }
+
+    // MARK: - Coverage
+
+    private func updateCoverage(_ p: SIMD3<Float>, cameraPosition: SIMD3<Float>) {
+        let key = voxelKey(p, size: areaVoxelSize)
+        // Direction from the surface to the camera: 8 compass sectors x (from above / level-or-below).
+        let d = cameraPosition - p
+        let length = max(simd_length(d), 0.001)
+        let yaw = atan2(d.x, d.z)
+        let sector = min(max(Int((yaw + Float.pi) / (2 * Float.pi) * 8), 0), 7)
+        let bit = UInt16(1) << UInt16(sector + (d.y / length > 0.35 ? 8 : 0))
+
+        let slot: Int
+        if let existing = coverageSlots[key] {
+            slot = Int(existing)
+            let old = coverageMasks[slot]
+            if old & bit != 0 { return }
+            coverageMasks[slot] = old | bit
+        } else {
+            guard coverageCount < coverageCapacity else { return }
+            slot = coverageCount
+            coverageSlots[key] = Int32(slot)
+            coverageMasks.append(bit)
+            coverageCount += 1
+        }
+        let views = coverageMasks[slot].nonzeroBitCount
+        if views == 3 { wellCoveredVoxels += 1 }
+        let center = ((p / areaVoxelSize).rounded(.down) + 0.5) * areaVoxelSize
+        let pointer = coverageBuffer.contents().bindMemory(to: PointCloudVertex.self, capacity: coverageCapacity)
+        pointer[slot] = PointCloudVertex(position: SIMD4<Float>(center.x, center.y, center.z, 0.07),
+                                         color: PointCloudAccumulator.coverageColor(views: views))
+    }
+
+    static func coverageColor(views: Int) -> SIMD4<Float> {
+        switch views {
+        case 0, 1: return SIMD4<Float>(0.95, 0.2, 0.2, 1)    // seen from one direction: scan more
+        case 2: return SIMD4<Float>(1.0, 0.6, 0.15, 1)
+        case 3: return SIMD4<Float>(0.95, 0.9, 0.2, 1)
+        default: return SIMD4<Float>(0.25, 0.85, 0.35, 1)    // seen from 4+ directions: good
         }
     }
 }

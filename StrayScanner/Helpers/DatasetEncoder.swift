@@ -81,6 +81,22 @@ class DatasetEncoder {
         self.captureSettingsPath = datasetDirectory.appendingPathComponent("capture_settings.json", isDirectory: false)
         self.frameQualityEncoder = FrameQualityEncoder(url: datasetDirectory.appendingPathComponent("frame_quality.csv", isDirectory: false))
         self.markerEncoder = MarkerEncoder(url: datasetDirectory.appendingPathComponent("markers.csv", isDirectory: false))
+        // Marks the scan as unfinished until wrapUp(); a scan left with this file after a crash
+        // is recovered on the next launch (see AppDaemon).
+        FileManager.default.createFile(atPath: datasetDirectory.appendingPathComponent(DatasetEncoder.inProgressMarker).path, contents: nil)
+    }
+
+    static let inProgressMarker = ".recording"
+    static let worldMapFileName = "worldmap.arexperience"
+
+    /// Saves ARKit's map of the room so a later recording can continue in the same coordinates.
+    static func writeWorldMap(_ map: ARWorldMap, directory: URL) {
+        do {
+            let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
+            try data.write(to: directory.appendingPathComponent(worldMapFileName), options: .atomic)
+        } catch {
+            print("Could not save world map: \(error.localizedDescription)")
+        }
     }
 
     /// Pins the current camera pose to markers.csv (for guided-tour stops etc.).
@@ -191,6 +207,7 @@ class DatasetEncoder {
         queue.sync {
             self.markerEncoder.done()
         }
+        try? FileManager.default.removeItem(at: datasetDirectory.appendingPathComponent(DatasetEncoder.inProgressMarker))
         writeIntrinsics()
         switch self.rgbEncoder.status {
             case .allGood:

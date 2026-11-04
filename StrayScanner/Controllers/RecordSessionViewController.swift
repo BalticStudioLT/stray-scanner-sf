@@ -32,7 +32,28 @@ class MetalView : UIView {
     }
 }
 
+enum TorchMode: Int {
+    case off = 0, on = 1, alternate = 2
+    var symbolName: String {
+        switch self {
+        case .off: return "bolt.slash.fill"
+        case .on: return "bolt.fill"
+        case .alternate: return "bolt.horizontal.fill"
+        }
+    }
+    var title: String {
+        switch self {
+        case .off: return "Light off"
+        case .on: return "Light on"
+        case .alternate: return "Light on/off every second (two light setups)"
+        }
+    }
+}
+
 class RecordSessionViewController : UIViewController, ARSessionDelegate {
+    /// Folder of an earlier scan to continue in the same coordinates (its saved ARKit world map is loaded).
+    var continueFrom: URL?
+    private var relocalized = false
     private var unsupported: Bool = false
     private var arConfiguration: ARWorldTrackingConfiguration?
     private let session = ARSession()
@@ -58,6 +79,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var bytesPerSecond: Double = 0
     private var sizeCheckRunning = false
     private var lastSizeCheck = Date.distantPast
+    private let wallGuide = WallSweepGuide()
+    private var torchMode: TorchMode = .off
+    private var torchTimer: Timer?
+    private var torchIsOn = false
+    private var worldMapTimer: Timer?
+    private var autoDimmedForHeat = false
+    private var cpuUsage: Double = 0
+    private var frameCounter = 0
     var dismissFunction: Optional<() -> Void> = Optional.none
 
     // MARK: Views
@@ -66,9 +95,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private let timerPanel = Glass.panel(cornerRadius: 18)
     private let timerDot = UIView()
     private let timeLabel = UILabel()
-    private let trackingPanel = Glass.panel(cornerRadius: 18)
     private let trackingDot = UIView()
-    private let trackingLabel = UILabel()
+    private let layersButton = Glass.button(title: nil, symbol: "square.3.layers.3d")
+    private let flashButton = Glass.button(title: nil, symbol: "bolt.slash.fill")
+    private let cameraInset = MetalPreviewView()
+    private let depthInset = MetalPreviewView()
+    private let minimapInset = MetalPreviewView()
+    private let insetStack = UIStackView()
     private let statsPanel = Glass.panel(cornerRadius: 20)
     private let statsLabel = UILabel()
     private let coverageRing = CoverageRingView()
@@ -117,6 +150,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateFpsSetting()
         updateShutterButton()
         setViewMode(ViewMode.load(), save: false)
+        applyInsetSettings()
+        renderer?.showCoverage = UserDefaults.standard.bool(forKey: "ShowCoverage")
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -131,6 +166,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         super.viewWillDisappear(animated)
         uiTimer?.invalidate()
         uiTimer = nil
+        setTorchMode(.off)
         restoreBrightness()
         UIApplication.shared.isIdleTimerDisabled = false
         datasetEncoder = nil
@@ -149,6 +185,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             unsupported = true
         } else {
             config.frameSemantics.insert(.sceneDepth)
+            config.planeDetection = [.vertical]
+            if let folder = continueFrom,
+               let data = try? Data(contentsOf: folder.appendingPathComponent(DatasetEncoder.worldMapFileName)),
+               let map = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+                config.initialWorldMap = map
+            }
             session.run(config)
             // Apply the shutter after the session has configured the camera.
             exposureController.apply(chosenShutterSetting)
@@ -166,8 +208,34 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         // Top bar: back, timer, tracking state.
         closeButton.accessibilityLabel = "Back"
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        trackingDot.translatesAutoresizingMaskIntoConstraints = false
+        trackingDot.backgroundColor = .systemYellow
+        trackingDot.layer.cornerRadius = 5
+        timerPanel.contentView.addSubview(trackingDot)
         configurePill(timerPanel, dot: timerDot, label: timeLabel, dotColor: UIColor(white: 1, alpha: 0.5), text: "00:00:00")
-        configurePill(trackingPanel, dot: trackingDot, label: trackingLabel, dotColor: .systemYellow, text: "Starting")
+        layersButton.accessibilityLabel = "Views and path guide"
+        layersButton.showsMenuAsPrimaryAction = true
+        layersButton.menu = makeLayersMenu()
+        flashButton.accessibilityLabel = "Light"
+        flashButton.addTarget(self, action: #selector(flashTapped), for: .touchUpInside)
+        if !exposureController.hasTorch { flashButton.isEnabled = false }
+
+        // Small views (camera, LiDAR, minimap), shown from the views menu.
+        insetStack.translatesAutoresizingMaskIntoConstraints = false
+        insetStack.axis = .vertical
+        insetStack.spacing = 8
+        insetStack.alignment = .trailing
+        for (inset, name) in [(cameraInset, "Camera"), (depthInset, "LiDAR depth"), (minimapInset, "Minimap")] {
+            inset.translatesAutoresizingMaskIntoConstraints = false
+            inset.layer.cornerRadius = 14
+            inset.layer.cornerCurve = .continuous
+            inset.layer.borderWidth = 1
+            inset.layer.borderColor = UIColor(white: 1, alpha: 0.35).cgColor
+            inset.clipsToBounds = true
+            inset.isHidden = true
+            inset.accessibilityLabel = name
+            insetStack.addArrangedSubview(inset)
+        }
 
         // Stats card with direction ring.
         statsLabel.numberOfLines = 0
@@ -240,7 +308,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         dockPanel.contentView.addSubview(modeTitle)
         dockPanel.contentView.addSubview(controlsRow)
 
-        [statsPanel, advicePanel, pinButton, pointHintLabel, dockPanel, closeButton, timerPanel, trackingPanel].forEach { view.addSubview($0) }
+        [insetStack, statsPanel, advicePanel, pinButton, pointHintLabel, dockPanel, closeButton, layersButton, flashButton, timerPanel].forEach { view.addSubview($0) }
 
         let safe = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
@@ -254,13 +322,27 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             closeButton.widthAnchor.constraint(equalToConstant: 44),
             closeButton.heightAnchor.constraint(equalToConstant: 44),
 
-            timerPanel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            layersButton.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 8),
+            layersButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            layersButton.widthAnchor.constraint(equalToConstant: 44),
+            layersButton.heightAnchor.constraint(equalToConstant: 44),
+            flashButton.leadingAnchor.constraint(equalTo: layersButton.trailingAnchor, constant: 8),
+            flashButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            flashButton.widthAnchor.constraint(equalToConstant: 44),
+            flashButton.heightAnchor.constraint(equalToConstant: 44),
+
+            timerPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             timerPanel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             timerPanel.heightAnchor.constraint(equalToConstant: 36),
 
-            trackingPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            trackingPanel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            trackingPanel.heightAnchor.constraint(equalToConstant: 36),
+            insetStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            insetStack.topAnchor.constraint(equalTo: statsPanel.bottomAnchor, constant: 8),
+            cameraInset.widthAnchor.constraint(equalToConstant: 96),
+            cameraInset.heightAnchor.constraint(equalToConstant: 128),
+            depthInset.widthAnchor.constraint(equalToConstant: 96),
+            depthInset.heightAnchor.constraint(equalToConstant: 128),
+            minimapInset.widthAnchor.constraint(equalToConstant: 128),
+            minimapInset.heightAnchor.constraint(equalToConstant: 128),
 
             statsPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             statsPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
@@ -341,9 +423,19 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             dot.widthAnchor.constraint(equalToConstant: 10),
             dot.heightAnchor.constraint(equalToConstant: 10),
             label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 8),
-            label.trailingAnchor.constraint(equalTo: panel.contentView.trailingAnchor, constant: -12),
             label.centerYAnchor.constraint(equalTo: panel.contentView.centerYAnchor),
         ])
+        if panel === timerPanel {
+            NSLayoutConstraint.activate([
+                trackingDot.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
+                trackingDot.trailingAnchor.constraint(equalTo: panel.contentView.trailingAnchor, constant: -12),
+                trackingDot.centerYAnchor.constraint(equalTo: panel.contentView.centerYAnchor),
+                trackingDot.widthAnchor.constraint(equalToConstant: 10),
+                trackingDot.heightAnchor.constraint(equalToConstant: 10),
+            ])
+        } else {
+            label.trailingAnchor.constraint(equalTo: panel.contentView.trailingAnchor, constant: -12).isActive = true
+        }
     }
 
     // MARK: - IMU
@@ -419,7 +511,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         pinButton.isEnabled = true
         timerDot.backgroundColor = .systemRed
         datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting], exposureController: exposureController)
-        datasetEncoder?.writeCaptureSettings(exposureController.captureSettings())
+        var settings = exposureController.captureSettings()
+        settings["torch_mode"] = ["off", "on", "alternate_1s"][torchMode.rawValue]
+        if let folder = continueFrom {
+            settings["continues_scan"] = folder.lastPathComponent
+            settings["relocalized_at_start"] = relocalized
+        }
+        datasetEncoder?.writeCaptureSettings(settings)
+        worldMapTimer?.invalidate()
+        worldMapTimer = Timer.scheduledTimer(timeInterval: 20, target: self, selector: #selector(saveWorldMap), userInfo: nil, repeats: true)
         startRawIMU()
         updateTime()
     }
@@ -431,6 +531,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         startedRecording = nil
         recordButton.isRecording = false
+        worldMapTimer?.invalidate()
+        worldMapTimer = nil
+        saveWorldMap()
         // Stop IMU updates
         stopRawIMU()
         datasetEncoder?.wrapUp()
@@ -584,11 +687,21 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         lastFrame = frame
         let recording = startedRecording != nil
+        frameCounter += 1
         qualityMonitor.update(frame: frame, recording: recording)
+        if case .normal = frame.camera.trackingState { relocalized = true }
+        if wallGuide.isActive {
+            wallGuide.update(frame: frame)
+            if frameCounter % 3 == 0 { renderer?.guideVertices = wallGuide.vertices() }
+        } else if !(renderer?.guideVertices.isEmpty ?? true) {
+            renderer?.guideVertices = []
+        }
         renderer?.render(frame: frame)
         if recording {
             if let encoder = datasetEncoder {
-                encoder.add(frame: frame, quality: qualityMonitor.currentQuality())
+                var quality = qualityMonitor.currentQuality()
+                quality.torchLevel = exposureController.torchLevel
+                encoder.add(frame: frame, quality: quality)
             } else {
                 print("There is no video encoder. That can't be good.")
             }
@@ -603,11 +716,20 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateStatsText()
         coverageRing.update(covered: qualityMonitor.coveredSectors, current: qualityMonitor.headingSector)
         let seconds = startedRecording.map { Date().timeIntervalSince($0) } ?? 0
-        let advice = qualityMonitor.advice(recording: startedRecording != nil,
+        let thermal = ProcessInfo.processInfo.thermalState
+        handleHeat(thermal)
+        var advice = qualityMonitor.advice(recording: startedRecording != nil,
                                            recordingSeconds: seconds,
-                                           underexposed: exposureController.isUnderexposed,
-                                           thermalState: ProcessInfo.processInfo.thermalState,
+                                           underexposed: exposureController.isUnderexposed && torchMode == .off,
+                                           thermalState: thermal,
                                            freeMinutes: freeMinutes)
+        if advice.level.rawValue < ScanAdvice.Level.warning.rawValue {
+            if continueFrom != nil && !relocalized {
+                advice = ScanAdvice(level: .warning, text: "Continuing: point at the area you scanned last to line up", symbolName: "arrow.triangle.2.circlepath")
+            } else if let guide = wallGuide.advice() {
+                advice = guide
+            }
+        }
         applyAdvice(advice)
         let blurRatio = qualityMonitor.blurPixels / ScanQualityMonitor.blurBadLimit
         blurMeter.setProgress(min(max(blurRatio, 0.02), 1), animated: true)
@@ -632,14 +754,157 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         switch qualityMonitor.trackingState {
         case .normal:
             trackingDot.backgroundColor = .systemGreen
-            trackingLabel.text = "Tracking"
         case .limited:
             trackingDot.backgroundColor = .systemYellow
-            trackingLabel.text = "Limited"
         case .notAvailable:
             trackingDot.backgroundColor = .systemRed
-            trackingLabel.text = "No tracking"
         }
+    }
+
+    // MARK: - Heat
+
+    private func handleHeat(_ state: ProcessInfo.ThermalState) {
+        if frameCounter % 4 == 0 || cpuUsage == 0 { cpuUsage = RecordSessionViewController.appCPUUsage() }
+        let hot = state == .serious || state == .critical
+        renderer?.lowPower = hot
+        if state == .critical && !autoDimmedForHeat && viewMode != .dim {
+            autoDimmedForHeat = true
+            setViewMode(.dim, save: false)
+            if torchMode != .off { setTorchMode(.off) }
+        }
+    }
+
+    /// CPU used by this app, in percent of one core (can exceed 100 on several cores).
+    private static func appCPUUsage() -> Double {
+        var threads: thread_act_array_t?
+        var threadCount: mach_msg_type_number_t = 0
+        guard task_threads(mach_task_self_, &threads, &threadCount) == KERN_SUCCESS, let threadList = threads else { return 0 }
+        var total: Double = 0
+        for index in 0..<Int(threadCount) {
+            var info = thread_basic_info()
+            var infoCount = mach_msg_type_number_t(MemoryLayout<thread_basic_info>.size / MemoryLayout<integer_t>.size)
+            let result = withUnsafeMutablePointer(to: &info) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) {
+                    thread_info(threadList[index], thread_flavor_t(THREAD_BASIC_INFO), $0, &infoCount)
+                }
+            }
+            if result == KERN_SUCCESS && (info.flags & TH_FLAGS_IDLE) == 0 {
+                total += Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100
+            }
+        }
+        let size = vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride)
+        vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: threadList)), size)
+        return total
+    }
+
+    // MARK: - World map (continue after a crash)
+
+    @objc private func saveWorldMap() {
+        guard let directory = datasetEncoder?.directory else { return }
+        session.getCurrentWorldMap { map, error in
+            guard let map = map else {
+                if let error = error { print("World map not available: \(error.localizedDescription)") }
+                return
+            }
+            DispatchQueue.global(qos: .utility).async {
+                DatasetEncoder.writeWorldMap(map, directory: directory)
+            }
+        }
+    }
+
+    // MARK: - Light
+
+    @objc private func flashTapped() {
+        let next = TorchMode(rawValue: (torchMode.rawValue + 1) % 3) ?? .off
+        setTorchMode(next)
+    }
+
+    private func setTorchMode(_ mode: TorchMode) {
+        torchMode = mode
+        torchTimer?.invalidate()
+        torchTimer = nil
+        exposureController.freezeISO = mode == .alternate
+        var configuration = flashButton.configuration
+        configuration?.image = UIImage(systemName: mode.symbolName)
+        flashButton.configuration = configuration
+        flashButton.accessibilityValue = mode.title
+        switch mode {
+        case .off:
+            torchIsOn = false
+            exposureController.setTorch(on: false)
+        case .on:
+            torchIsOn = true
+            exposureController.setTorch(on: true)
+        case .alternate:
+            torchIsOn = true
+            exposureController.setTorch(on: true)
+            torchTimer = Timer.scheduledTimer(timeInterval: 1.0, target: self, selector: #selector(toggleTorch), userInfo: nil, repeats: true)
+        }
+    }
+
+    @objc private func toggleTorch() {
+        torchIsOn.toggle()
+        exposureController.setTorch(on: torchIsOn)
+    }
+
+    // MARK: - Views menu
+
+    private func makeLayersMenu() -> UIMenu {
+        let defaults = UserDefaults.standard
+        func toggle(_ title: String, _ symbol: String, _ key: String, _ apply: @escaping () -> Void) -> UIAction {
+            let on = defaults.bool(forKey: key)
+            return UIAction(title: title, image: UIImage(systemName: symbol), state: on ? .on : .off) { [weak self] _ in
+                defaults.set(!on, forKey: key)
+                apply()
+                self?.layersButton.menu = self?.makeLayersMenu()
+            }
+        }
+        let insets = UIMenu(title: "Small views", options: .displayInline, children: [
+            toggle("Camera", "camera.fill", "InsetCamera") { [weak self] in self?.applyInsetSettings() },
+            toggle("LiDAR depth", "dot.radiowaves.left.and.right", "InsetDepth") { [weak self] in self?.applyInsetSettings() },
+            toggle("Minimap (top view)", "map.fill", "InsetMinimap") { [weak self] in self?.applyInsetSettings() },
+        ])
+        let cloud = UIMenu(title: "Point cloud", options: .displayInline, children: [
+            toggle("Colour by coverage (red = scan more)", "paintpalette.fill", "ShowCoverage") { [weak self] in
+                self?.renderer?.showCoverage = UserDefaults.standard.bool(forKey: "ShowCoverage")
+            },
+        ])
+        var guideItems: [UIMenuElement] = [
+            UIAction(title: "Off", state: wallGuide.spacing == nil ? .on : .off) { [weak self] _ in
+                self?.wallGuide.spacing = nil
+                self?.layersButton.menu = self?.makeLayersMenu()
+            }
+        ]
+        for spacing in WallSweepGuide.spacings {
+            let cm = Int((spacing * 100).rounded())
+            guideItems.append(UIAction(title: "Stripes every \(cm) cm", state: wallGuide.spacing == spacing ? .on : .off) { [weak self] _ in
+                self?.wallGuide.spacing = spacing
+                self?.layersButton.menu = self?.makeLayersMenu()
+            })
+        }
+        let guide = UIMenu(title: "Wall path guide (sweep floor ↔ ceiling)", options: .displayInline, children: guideItems)
+        return UIMenu(title: "", children: [insets, cloud, guide])
+    }
+
+    private func applyInsetSettings() {
+        let defaults = UserDefaults.standard
+        cameraInset.isHidden = !defaults.bool(forKey: "InsetCamera")
+        depthInset.isHidden = !defaults.bool(forKey: "InsetDepth")
+        minimapInset.isHidden = !defaults.bool(forKey: "InsetMinimap")
+        if let renderer = renderer {
+            if renderer.cameraInsetLayer == nil && !cameraInset.isHidden { configureInsetLayer(cameraInset.metalLayer, renderer: renderer) }
+            if renderer.depthInsetLayer == nil && !depthInset.isHidden { configureInsetLayer(depthInset.metalLayer, renderer: renderer) }
+            if renderer.minimapLayer == nil && !minimapInset.isHidden { configureInsetLayer(minimapInset.metalLayer, renderer: renderer) }
+            renderer.cameraInsetLayer = cameraInset.isHidden ? nil : cameraInset.metalLayer
+            renderer.depthInsetLayer = depthInset.isHidden ? nil : depthInset.metalLayer
+            renderer.minimapLayer = minimapInset.isHidden ? nil : minimapInset.metalLayer
+        }
+    }
+
+    private func configureInsetLayer(_ layer: CAMetalLayer, renderer: ScanRenderer) {
+        layer.device = renderer.metalDevice
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
     }
 
     private var freeMinutes: Double? {
@@ -663,7 +928,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         var lines = [exposure, blur, motion]
         if statsExpanded {
             let frames = datasetEncoder.map { "Frames \($0.savedFrameCount) · dropped \($0.droppedFrames) · pins \($0.markerCount)" } ?? "Not recording"
-            let surface = String(format: "Scanned ≈ %.0f m² · LiDAR %.0f%% confident", renderer?.pointCloud.surfaceArea ?? 0, m.confidentFraction * 100)
+            let cloud = renderer?.pointCloud
+            let surface = String(format: "Scanned ≈ %.0f m² · %.0f%% seen from 3+ sides · LiDAR %.0f%%",
+                                 cloud?.surfaceArea ?? 0, (cloud?.wellCoveredFraction ?? 0) * 100, m.confidentFraction * 100)
+            let heatNames: [ProcessInfo.ThermalState: String] = [.nominal: "normal", .fair: "warm", .serious: "hot (lighter preview)", .critical: "critical"]
+            let heat = String(format: "Heat %@ · app CPU %.0f%%", heatNames[ProcessInfo.processInfo.thermalState] ?? "?", cpuUsage)
             var storage = "Free " + ByteCountFormatter.string(fromByteCount: freeBytes ?? 0, countStyle: .file)
             if startedRecording != nil {
                 storage += " · scan " + ByteCountFormatter.string(fromByteCount: datasetBytes, countStyle: .file)
@@ -671,7 +940,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             }
             let battery = UIDevice.current.batteryLevel
             if battery >= 0 { storage += String(format: " · battery %.0f%%", battery * 100) }
-            lines += [frames, surface, storage]
+            lines += [frames, surface, storage, heat]
         }
         statsLabel.text = lines.joined(separator: "\n")
     }

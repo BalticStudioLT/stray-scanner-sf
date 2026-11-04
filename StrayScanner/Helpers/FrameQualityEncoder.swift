@@ -18,7 +18,7 @@ class FrameQualityEncoder {
         do {
             try "".write(to: url, atomically: true, encoding: .utf8)
             handle = try FileHandle(forWritingTo: url)
-            handle?.write("timestamp, frame, tracking_state, tracking_reason, linear_speed_mps, angular_speed_dps, est_blur_px, median_depth_m, depth_confident_fraction\n".data(using: .utf8)!)
+            handle?.write("timestamp, frame, tracking_state, tracking_reason, linear_speed_mps, angular_speed_dps, est_blur_px, median_depth_m, depth_confident_fraction, torch_level\n".data(using: .utf8)!)
         } catch let error {
             print("Can't create frame quality file \(url.absoluteString). \(error.localizedDescription)")
         }
@@ -29,9 +29,9 @@ class FrameQualityEncoder {
         guard let fileHandle = fileHandle else { return }
         let frame = String(format: "%06d", frameNumber)
         let line = "\(timestamp), \(frame), \(quality.trackingState), \(quality.trackingReason), "
-            + String(format: "%.4f, %.2f, %.3f, %.3f, %.3f\n",
+            + String(format: "%.4f, %.2f, %.3f, %.3f, %.3f, %.2f\n",
                      quality.linearSpeed, quality.angularSpeedDeg, quality.blurPixels,
-                     quality.medianDepth, quality.depthConfidentFraction)
+                     quality.medianDepth, quality.depthConfidentFraction, quality.torchLevel)
         fileHandle.write(line.data(using: .utf8)!)
     }
 

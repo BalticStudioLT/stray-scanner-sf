@@ -23,9 +23,11 @@ struct NavigationConfigurator: UIViewControllerRepresentable {
 
 struct RecordSessionManager: UIViewControllerRepresentable {
     @Environment(\.presentationMode) var presentationMode: Binding<PresentationMode>
-    
+    var continueFrom: URL? = nil
+
     func makeUIViewController(context: Context) -> some UIViewController {
         let viewController = RecordSessionViewController()
+        viewController.continueFrom = continueFrom
         viewController.setDismissFunction {
             presentationMode.wrappedValue.dismiss()
             viewController.setDismissFunction(Optional.none)
@@ -37,9 +39,11 @@ struct RecordSessionManager: UIViewControllerRepresentable {
 }
 
 struct NewSessionView : View {
-    
+    /// Folder of an earlier scan to continue (same coordinates via its saved world map).
+    var continueFrom: URL? = nil
+
     var body: some View {
-        RecordSessionManager()
+        RecordSessionManager(continueFrom: continueFrom)
             .ignoresSafeArea()
             .toolbar(.hidden, for: .navigationBar)
             .preferredColorScheme(.dark)
