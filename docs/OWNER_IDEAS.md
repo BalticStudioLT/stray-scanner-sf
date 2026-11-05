@@ -31,3 +31,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 21:11 "And could maybe splatforge optimize view before it has to be done by phone?"
 - 2026-11-05 22:27 "Other AI did its job. I want better UI"
 - 2026-11-05 22:42 (screenshot of recorder: black gap under preview, insets Depth/Depth/Map, "PC ✓ PC:") "We have a lot of unused soace. And viewer repeats same stuff."
+- 2026-11-05 22:53 "I still dont actually understand computer conection. Seems useless"
