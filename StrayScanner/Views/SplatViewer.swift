@@ -75,6 +75,33 @@ final class SplatData {
         computeStats()
     }
 
+    /// Splat indices, most visible first (opacity × size). Used to draw a lighter subset while the view moves.
+    lazy var importanceOrder: [UInt32] = {
+        let base = buffer.contents()
+        var keys = [UInt16](repeating: 0, count: count)
+        var buckets = [Int](repeating: 0, count: 4097)
+        for i in 0..<count {
+            let o = base.advanced(by: i * SplatLoader.stride)
+            let xx = Float(o.load(fromByteOffset: 12, as: Float16.self))
+            let yy = Float(o.load(fromByteOffset: 18, as: Float16.self))
+            let zz = Float(o.load(fromByteOffset: 22, as: Float16.self))
+            let alpha = Float(o.load(fromByteOffset: 27, as: UInt8.self)) / 255
+            let size = max(xx + yy + zz, 1e-10)                       // ~ squared extent
+            let score = log2(alpha * size + 1e-12)                    // about -40 … +10
+            let k = UInt16(min(max((score + 40) * 80, 0), 4095))
+            keys[i] = 4095 - k                                        // descending
+            buckets[Int(keys[i]) + 1] += 1
+        }
+        for k in 1...4096 { buckets[k] += buckets[k - 1] }
+        var out = [UInt32](repeating: 0, count: count)
+        for i in 0..<count {
+            let k = Int(keys[i])
+            out[buckets[k]] = UInt32(i)
+            buckets[k] += 1
+        }
+        return out
+    }()
+
     var orientation4: simd_float4x4 {
         let r = orientation
         return simd_float4x4(SIMD4(r.columns.0, 0), SIMD4(r.columns.1, 0), SIMD4(r.columns.2, 0), SIMD4(0, 0, 0, 1))
@@ -323,6 +350,11 @@ final class GaussianSplatRenderer {
     var onSorted: (() -> Void)?
     /// Splats drawn last frame (after culling), for the status line.
     private(set) var visibleCount = 0
+    /// While the view moves, sort and draw only the most visible splats so the order keeps up with the camera
+    /// (a stale order is what smears big scenes); the full set is sorted again once the view is still.
+    var interactive = false
+    static let interactiveBudget = 800_000
+    private var lastSortedSubset = false
 
     init?(device: MTLDevice, splats: SplatData, colorFormat: MTLPixelFormat) {
         guard let library = device.makeDefaultLibrary() else { return nil }
@@ -378,24 +410,34 @@ final class GaussianSplatRenderer {
         lock.lock()
         defer { lock.unlock() }
         guard !sorting else { return }
-        if let last = lastSortedView {
+        let subset = interactive && splats.count > GaussianSplatRenderer.interactiveBudget
+        if let last = lastSortedView, subset == lastSortedSubset {
             let moved = simd_distance(last.columns.3, view.columns.3) + simd_distance(last.columns.2, view.columns.2)
             if moved < 0.01 { return }
         }
         sorting = true
         lastSortedView = view
+        lastSortedSubset = subset
         projectionForCull = projection
         let target = (currentOrder + 1) % orderBuffers.count
         sortQueue.async { [weak self] in
-            self?.sort(view: view, into: target)
+            guard let self = self else { return }
+            if subset {
+                let list = self.splats.importanceOrder
+                list.withUnsafeBufferPointer { l in
+                    self.sort(view: view, into: target, subset: UnsafeBufferPointer(rebasing: l[0..<GaussianSplatRenderer.interactiveBudget]))
+                }
+            } else {
+                self.sort(view: view, into: target, subset: nil)
+            }
         }
     }
 
     /// Cull + bucket sort by view-space depth (65 536 buckets), farthest first, on all CPU cores:
     /// 1) depth of every splat, dropping ones behind the camera or well outside the view (a wide margin so turning
     ///    the phone doesn't show holes before the next sort), 2) per-core histograms, 3) stable parallel scatter.
-    private func sort(view: simd_float4x4, into target: Int) {
-        let n = splats.count
+    private func sort(view: simd_float4x4, into target: Int, subset: UnsafeBufferPointer<UInt32>?) {
+        let n = subset?.count ?? splats.count
         let chunks = GaussianSplatRenderer.chunks
         let r = SIMD4<Float>(view.columns.0.z, view.columns.1.z, view.columns.2.z, view.columns.3.z)
         let rx = SIMD4<Float>(view.columns.0.x, view.columns.1.x, view.columns.2.x, view.columns.3.x)
@@ -413,7 +455,7 @@ final class GaussianSplatRenderer {
             DispatchQueue.concurrentPerform(iterations: chunks) { c in
                 var lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
                 for i in (c * per)..<min((c + 1) * per, n) {
-                    let p = SIMD4<Float>(positions[i], 1)
+                    let p = SIMD4<Float>(positions[subset.map { Int($0[i]) } ?? i], 1)
                     let z = simd_dot(r, p)
                     let d = -z
                     // NaN marks culled splats.
@@ -460,7 +502,7 @@ final class GaussianSplatRenderer {
                 for i in (c * per)..<min((c + 1) * per, n) {
                     if depths[i].isNaN { continue }
                     let k = Int(keys[i])
-                    out[Int(h[k])] = UInt32(i)
+                    out[Int(h[k])] = subset.map { $0[i] } ?? UInt32(i)
                     h[k] += 1
                 }
             }
@@ -543,7 +585,21 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
 
     @objc private func resetTapped() { resetCamera() }
 
+    private var stillTimer: Timer?
+    /// Light subset while a gesture runs; full quality 0.2 s after it stops.
+    private func interacting(_ g: UIGestureRecognizer) {
+        renderer?.interactive = true
+        stillTimer?.invalidate()
+        if g.state == .ended || g.state == .cancelled || g.state == .failed {
+            stillTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+                self?.renderer?.interactive = false
+                self?.setNeedsDisplay()
+            }
+        }
+    }
+
     @objc private func pan(_ g: UIPanGestureRecognizer) {
+        interacting(g)
         guard g.numberOfTouches <= 1 else { return }
         let d = g.translation(in: self)
         g.setTranslation(.zero, in: self)
@@ -553,12 +609,14 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
     }
 
     @objc private func pinch(_ g: UIPinchGestureRecognizer) {
+        interacting(g)
         distance = min(max(distance / Float(g.scale), 0.05), 500)
         g.scale = 1
         setNeedsDisplay()
     }
 
     @objc private func twoFingerMove(_ g: UIPanGestureRecognizer) {
+        interacting(g)
         let d = g.translation(in: self)
         g.setTranslation(.zero, in: self)
         let right = SIMD3<Float>(cos(yaw), 0, -sin(yaw))

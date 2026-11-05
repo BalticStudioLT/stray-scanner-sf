@@ -24,3 +24,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 10:52 (screenshot of splat viewer, kitchen_v2 tiny in the middle) "Also splats loads somewhere very far away"
 - 2026-11-05 19:57 (screenshot: dotnuva_tractor hero_30k in viewer, sideways) "I oppened scan on my phone. It stand sideways. Not orientated to ground. Also i would wanna to change quality. Not just to 1m splat."
 - 2026-11-05 20:27 "Can we optimize engine?" (splat viewer)
+- 2026-11-05 20:51 (screenshot: 4 M splats dotnuva_tractor, smeared/blurry while moving, big blobs near camera) "More moving smedges the splat"

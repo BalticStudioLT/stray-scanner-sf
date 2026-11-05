@@ -235,7 +235,10 @@ vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float k = min(sqrt(2.0 * log(255.0 * alpha0)), 3.0);
     float r1 = k * sqrt(l1);
     float r2 = k * sqrt(l2);
-    if (r1 > 1500.0 || r1 < 0.3) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+    // Splats right in front of the lens blow up into screen-sized smears: skip anything wider than ~the screen,
+    // and fade splats closer than 15 cm.
+    if (r1 > 0.8 * max(u.viewport.x, u.viewport.y) || r1 < 0.3) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+    if (d < 0.15) { o.color.a *= half(saturate((d - 0.02) / 0.13)); }
 
     float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
     float2 offsetPx = corner.x * v1 * r1 + corner.y * v2 * r2;
