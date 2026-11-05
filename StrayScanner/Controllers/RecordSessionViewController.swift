@@ -359,8 +359,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         NSLayoutConstraint.activate([
             previewView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             previewView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            previewView.topAnchor.constraint(equalTo: safe.topAnchor),
-            previewView.heightAnchor.constraint(equalTo: previewView.widthAnchor, multiplier: 4.0 / 3.0),
+            // Full screen: the picture fills everything behind the controls (cropped at the sides, not stretched).
+            previewView.topAnchor.constraint(equalTo: view.topAnchor),
+            previewView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             closeButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             closeButton.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
@@ -405,7 +406,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
             advicePanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             advicePanel.trailingAnchor.constraint(equalTo: pinButton.leadingAnchor, constant: -8),
-            advicePanel.bottomAnchor.constraint(equalTo: previewView.bottomAnchor, constant: -10),
+            advicePanel.bottomAnchor.constraint(equalTo: dockPanel.topAnchor, constant: -10),
             adviceIcon.leadingAnchor.constraint(equalTo: advicePanel.contentView.leadingAnchor, constant: 14),
             adviceIcon.centerYAnchor.constraint(equalTo: adviceLabel.centerYAnchor),
             adviceIcon.widthAnchor.constraint(equalToConstant: 22),
@@ -445,10 +446,6 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             fpsButton.widthAnchor.constraint(equalToConstant: 104),
             shutterButton.widthAnchor.constraint(equalToConstant: 104),
         ])
-        // Keep the dock below the preview when there is room; on short screens it may overlap it.
-        let gap = dockPanel.topAnchor.constraint(greaterThanOrEqualTo: previewView.bottomAnchor, constant: 10)
-        gap.priority = .defaultHigh
-        gap.isActive = true
         updateStatsText()
         applyAdvice(ScanAdvice(level: .info, text: "Starting camera…", symbolName: "camera.fill"))
     }
@@ -684,7 +681,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func setViewMode(_ mode: ViewMode, save: Bool) {
+        let previous = viewMode
         viewMode = mode
+        normalizeInsets(previousMain: previous)
         renderer?.mode = mode
         modeControl.selectedSegmentIndex = ViewMode.displayOrder.firstIndex(of: mode) ?? 0
         if let title = view.viewWithTag(501) as? UILabel {
@@ -1078,6 +1077,21 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         renderer.insets = list
     }
 
+    /// Small views show three different things, none of them the same as the big view.
+    private func normalizeInsets(previousMain: ViewMode) {
+        if let i = insetModes.firstIndex(of: viewMode) { insetModes[i] = previousMain }
+        let pool: [ViewMode] = [.camera, .depth, .map, .pointCloud, .overlay]
+        var seen = Set<ViewMode>([viewMode == .dim ? .camera : viewMode])
+        for i in insetModes.indices {
+            if seen.contains(insetModes[i]) || insetModes[i] == .dim {
+                insetModes[i] = pool.first { !seen.contains($0) && !insetModes.contains($0) } ?? insetModes[i]
+            }
+            seen.insert(insetModes[i])
+        }
+        updateInsetCaptions()
+        updateRendererInsets()
+    }
+
     private func updateInsetCaptions() {
         for (index, inset) in [cameraInset, depthInset, minimapInset].enumerated() {
             let title = insetModes[index].title
@@ -1092,7 +1106,6 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let index = inset.tag - 600
         guard index >= 0 && index < insetModes.count else { return }
         let small = insetModes[index]
-        insetModes[index] = viewMode
         UIView.transition(with: view, duration: 0.25, options: .transitionCrossDissolve, animations: {
             self.setViewMode(small, save: true)
             self.updateInsetCaptions()

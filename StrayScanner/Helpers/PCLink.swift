@@ -512,7 +512,9 @@ final class PCLiveLink {
                 self.hint = ScanAdvice(level: level, text: (json["text"] as? String) ?? "", symbolName: "desktopcomputer")
                 self.hintExpires = Date().addingTimeInterval((json["ttl"] as? Double) ?? 5)
             case "status":
-                self.statusText = "PC ✓ " + ((json["text"] as? String) ?? "")
+                var text = (json["text"] as? String) ?? ""
+                for prefix in ["PC: ", "PC "] where text.hasPrefix(prefix) { text.removeFirst(prefix.count) }
+                self.statusText = "PC ✓ " + text
             case "markers":
                 let color = (json["color"] as? [Double]) ?? [1, 0, 1]
                 let rgba = SIMD4<Float>(Float(color[safe: 0] ?? 1), Float(color[safe: 1] ?? 0), Float(color[safe: 2] ?? 1), 1)

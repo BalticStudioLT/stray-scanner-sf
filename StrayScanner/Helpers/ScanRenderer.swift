@@ -152,7 +152,7 @@ final class ScanRenderer {
 
         func quadPipeline(_ fragmentName: String) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = library.makeFunction(name: "drawRectangle")
+            descriptor.vertexFunction = library.makeFunction(name: "drawRectangleFill")
             descriptor.fragmentFunction = library.makeFunction(name: fragmentName)
             descriptor.vertexDescriptor = quadDescriptor
             descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
@@ -292,7 +292,7 @@ final class ScanRenderer {
             encoder.setCullMode(.none)
             if bindQuadTextures(encoder, textures: textures, needsCamera: mode != .depth, needsDepth: mode != .camera) {
                 encoder.setRenderPipelineState(pipeline)
-                drawQuad(encoder)
+                drawQuad(encoder, size: size, image: frame.camera.imageResolution)
             }
             // Path-guide stripes over the live picture.
             if !guideVertices.isEmpty && mode != .depth && !isInset {
@@ -366,9 +366,14 @@ final class ScanRenderer {
 
     // MARK: - Drawing
 
-    private func drawQuad(_ encoder: MTLRenderCommandEncoder) {
+    private func drawQuad(_ encoder: MTLRenderCommandEncoder, size: CGSize, image: CGSize) {
         encoder.setVertexBuffer(quadBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(quadBuffer, offset: 0, index: 1)
+        // Aspect fill: the sensor image is landscape, shown upright (height/width); widen whichever axis is short.
+        let pictureAspect = Float(image.height / max(image.width, 1))
+        let viewAspect = Float(size.width / max(size.height, 1))
+        var scale = viewAspect < pictureAspect ? SIMD2<Float>(pictureAspect / viewAspect, 1)
+                                               : SIMD2<Float>(1, viewAspect / pictureAspect)
+        encoder.setVertexBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 

@@ -39,6 +39,17 @@ vertex VertexOut drawRectangle(const device VertexIn* vertexIn[[ buffer(0) ]],
     return out;
 }
 
+/// Same quad, scaled so the 4:3 camera picture fills any screen shape (crops the sides, never stretches).
+vertex VertexOut drawRectangleFill(const device VertexIn* vertexIn[[ buffer(0) ]],
+                                   constant float2& scale [[ buffer(1) ]],
+                                   uint vertexIndex [[ vertex_id ]]) {
+    VertexOut out;
+    VertexIn v = vertexIn[vertexIndex];
+    out.vertexCoordinate = float4(v.vertexCoordinates * scale, 0.0, 1.0);
+    out.textureCoordinate = v.textureCoordinates;
+    return out;
+}
+
 fragment half4 displayTexture(VertexOut in [[stage_in]],
                             texture2d<float, access::sample> capturedImageTextureY [[ texture(kTextureIndexY) ]],
                             texture2d<float, access::sample> capturedImageTextureCbCr [[ texture(kTextureIndexCbCr) ]]) {
