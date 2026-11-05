@@ -35,3 +35,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 23:00 "I like 1-2 options." (live PC preview splat while scanning + clear PC tips/verdict)
 - 2026-11-05 23:32 (LT) "Mastei kazka apie FSR arba optical flow? Dar niekas nera dares sitam" (FSR/MetalFX upscaling, optical flow — "nobody has done this yet")
 - 2026-11-05 23:34 (LT) "Plius galbut galima dar naudoti point of interest quality. Kuomet toliau esantis splat naudoja mazesne rezoliucija o priartejus padideja rezoliucija ir splatu kiekis." (distance-based LOD / streaming detail)
+- 2026-11-05 23:39 (LT) "Tinka. Kokiu dar triuku butu galima panaudoti ir sukurti? Gal dlss 5 galima naudoti ar kazka panasaus?" — agreed order: PC preview+tips, optical-flow masks, LOD, MetalFX
