@@ -38,7 +38,8 @@ struct PCLinkSettings {
                               port: port > 0 ? port : 8777,
                               token: cleanToken(d.string(forKey: tokenKey) ?? ""),
                               autoUpload: d.bool(forKey: autoUploadKey),
-                              live: d.bool(forKey: liveKey))
+                              // On unless the owner turned it off: hints only reach the phone through it.
+                              live: d.object(forKey: liveKey) == nil ? true : d.bool(forKey: liveKey))
     }
 
     func save() {
@@ -285,7 +286,16 @@ final class PCLiveLink {
         self.settings = settings
     }
 
+    private var closedByUs = false
+    private var lastScanName: String?
+    private var imageSize: (Int, Int)?
+    private var retryCount = 0
+
     func connect(scanName: String?, frame: ARFrame?) {
+        closedByUs = false
+        lastScanName = scanName
+        if let frame = frame { imageSize = (Int(frame.camera.imageResolution.width), Int(frame.camera.imageResolution.height)) }
+        statusText = "PC: connecting to \(settings.host)…"
         // Python's http.server (Studio, port 8777) cannot do WebSockets: the live link listens on the next port.
         var liveSettings = settings
         liveSettings.port = settings.port + 1
@@ -297,15 +307,16 @@ final class PCLiveLink {
         task.resume()
         var hello: [String: Any] = ["type": "hello", "app": "stray-scanner-sf", "protocol": 1,
                                     "device": UIDevice.current.model, "scan": scanName ?? NSNull()]
-        if let frame = frame {
-            hello["image_width"] = Int(frame.camera.imageResolution.width)
-            hello["image_height"] = Int(frame.camera.imageResolution.height)
+        if let size = imageSize {
+            hello["image_width"] = size.0
+            hello["image_height"] = size.1
         }
         sendJSON(hello)
         receive()
     }
 
     func disconnect() {
+        closedByUs = true
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         connected = false
@@ -416,13 +427,39 @@ final class PCLiveLink {
             switch result {
             case .failure(let error):
                 DispatchQueue.main.async {
+                    guard !self.closedByUs else { return }
                     self.connected = false
-                    self.statusText = "PC: disconnected (\(error.localizedDescription))"
+                    self.statusText = PCLiveLink.explain(error, host: self.settings.host, port: self.settings.port + 1)
+                    // Keep trying: the PC may start later, Tailscale may reconnect, or the token gets fixed.
+                    self.retryCount += 1
+                    let delay = min(5.0 * Double(self.retryCount), 30.0)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        guard !self.closedByUs, !self.connected else { return }
+                        self.task?.cancel()
+                        self.connect(scanName: self.lastScanName, frame: nil)
+                    }
                 }
             case .success(let message):
                 if case .string(let text) = message { self.handle(text) }
                 self.receive()
             }
+        }
+    }
+
+    /// Plain-language reason why the live link is down.
+    static func explain(_ error: Error, host: String, port: Int) -> String {
+        let code = (error as NSError).code
+        switch code {
+        case NSURLErrorBadServerResponse:
+            return "PC ✗ refused — wrong token? (Settings ▸ SplatForge PC)"
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            return "PC ✗ \(host) not found — Tailscale on?"
+        case NSURLErrorCannotConnectToHost:
+            return "PC ✗ no answer on port \(port) — SplatForge Studio running?"
+        case NSURLErrorTimedOut, NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+            return "PC ✗ network lost — retrying"
+        default:
+            return "PC ✗ \(error.localizedDescription) — retrying"
         }
     }
 
@@ -434,6 +471,7 @@ final class PCLiveLink {
               let type = json["type"] as? String else { return }
         DispatchQueue.main.async {
             self.connected = true
+            self.retryCount = 0
             switch type {
             case "hint":
                 let level: ScanAdvice.Level
@@ -446,7 +484,7 @@ final class PCLiveLink {
                 self.hint = ScanAdvice(level: level, text: (json["text"] as? String) ?? "", symbolName: "desktopcomputer")
                 self.hintExpires = Date().addingTimeInterval((json["ttl"] as? Double) ?? 5)
             case "status":
-                self.statusText = "PC: " + ((json["text"] as? String) ?? "")
+                self.statusText = "PC ✓ " + ((json["text"] as? String) ?? "")
             case "markers":
                 let color = (json["color"] as? [Double]) ?? [1, 0, 1]
                 let rgba = SIMD4<Float>(Float(color[safe: 0] ?? 1), Float(color[safe: 1] ?? 0), Float(color[safe: 2] ?? 1), 1)

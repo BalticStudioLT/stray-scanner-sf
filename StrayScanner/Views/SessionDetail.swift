@@ -64,7 +64,12 @@ struct SessionDetailView: View {
             .edgesIgnoringSafeArea(.all)
         VStack {
             VideoPlayer(player: player ?? AVPlayer(url: defaultUrl))
+                // The video is stored the way the sensor sees it (landscape); scans are filmed upright,
+                // so turn it a quarter turn to show the room the right way up.
+                .frame(width: height, height: height * 0.75)
+                .rotationEffect(.degrees(90))
                 .frame(width: width, height: height)
+                .clipped()
                 .padding(.horizontal, 0.0)
                 .onAppear {
                     if player == nil {
@@ -99,47 +104,52 @@ struct SessionDetailView: View {
                 .padding(.top, 10)
             }
 
-            HStack(spacing: 20) {
-                Button(action: sendToPC) {
-                    Label("PC", systemImage: "desktopcomputer")
-                }
-                .glassButton()
-                .disabled(pcProgress != nil)
-
+            // Two even columns of full-width buttons (an HStack squeezed the labels into tall empty pills).
+            let folder = recording.directoryPath()
+            let canContinue = folder.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(DatasetEncoder.worldMapFileName).path) } ?? false
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                 Button(action: shareItem) {
                     HStack {
-                        if isCreatingPackage {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                        } else {
-                            Image(systemName: "square.and.arrow.up")
-                        }
-                        Text(isCreatingPackage ? "Preparing..." : "Share")
-                            .fixedSize()
+                        if isCreatingPackage { ProgressView().scaleEffect(0.8) } else { Image(systemName: "square.and.arrow.up") }
+                        Text(isCreatingPackage ? "Preparing…" : "Share").lineLimit(1)
                     }
-                    .frame(minWidth: 100)
+                    .frame(maxWidth: .infinity, minHeight: 32)
                 }
                 .glassButton(prominent: true)
                 .disabled(isCreatingPackage)
 
-                if let folder = recording.directoryPath(),
-                   FileManager.default.fileExists(atPath: folder.appendingPathComponent(DatasetEncoder.worldMapFileName).path) {
+                Button(action: sendToPC) {
+                    Label("Send to PC", systemImage: "desktopcomputer")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .glassButton()
+                .disabled(pcProgress != nil)
+
+                if let folder = folder, canContinue {
                     NavigationLink(destination: NewSessionView(continueFrom: folder)) {
                         Label("Continue", systemImage: "arrow.triangle.2.circlepath")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .glassButton()
                     NavigationLink(destination: UltraWideSessionView(parentScan: folder)) {
-                        Label("Add 0.5× pass", systemImage: "camera.aperture")
+                        Label("Add 0.5×", systemImage: "camera.aperture")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .glassButton()
                 }
 
                 Button(role: .destructive, action: deleteItem) {
                     Label("Delete", systemImage: "trash")
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 32)
                 }
                 .glassButton()
                 .tint(.red)
             }
+            .padding(.horizontal, 16)
             .padding(.top, 20)
             Spacer()
         }

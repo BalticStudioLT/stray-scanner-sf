@@ -17,3 +17,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 01:39 "Make view more modern, clicking some view swaps it with big screen"
 - 2026-11-05 10:10 "maybe 0.5 should be like add more information to scan? after i finished with lidar. also it should capture gyro and all data to help as much as possible with alignment"
 - 2026-11-05 10:11 "and connection says wrong studio token"
+- 2026-11-05 10:37 (screenshot of scan detail) "After scan layout is wrong. Also i didnt see any help from computer while scanning"
+- 2026-11-05 10:39 "And when playing video i would also be able to see all other views."

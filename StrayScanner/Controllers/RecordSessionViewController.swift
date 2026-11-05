@@ -1087,8 +1087,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             let frames = datasetEncoder.map { " · \($0.savedFrameCount) fr" } ?? ""
             let cloud = renderer?.pointCloud
             let cover = String(format: " · %.0f m² · %.0f%% 3+ sides", cloud?.surfaceArea ?? 0, (cloud?.wellCoveredFraction ?? 0) * 100)
-            statsLabel.text = String(format: "%@ · blur %.1f px", exposure, m.blurPixels) + "\n"
+            var text = String(format: "%@ · blur %.1f px", exposure, m.blurPixels) + "\n"
                 + String(format: "%.1f m away · moved %.1f m", m.medianDepth, m.distanceTravelled) + frames + cover
+            // The PC link state is always shown, so it is obvious whether SplatForge is helping.
+            if let link = liveLink { text += "\n" + link.statusText }
+            else if PCLinkSettings.load().isConfigured { text += "\nPC live link off (Settings ▸ SplatForge PC)" }
+            statsLabel.text = text
             return
         }
         var lines = [exposure, blur, motion]
