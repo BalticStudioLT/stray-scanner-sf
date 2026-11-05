@@ -48,9 +48,11 @@ enum SplatSource: Equatable, Identifiable {
 
 /// Splats packed for the GPU: 32 bytes each = float3 position, 6 × half covariance, rgba8, padding.
 final class SplatData {
-    let count: Int
+    /// Splats currently in the buffer (LOD streaming changes it); the buffer holds up to `capacity`.
+    var count: Int
+    let capacity: Int
     let buffer: MTLBuffer
-    let positions: [SIMD3<Float>]
+    var positions: [SIMD3<Float>]
     /// Degree-1 spherical harmonics (view-dependent colour): 9 halves per splat, coefficient-major (c1 rgb, c2 rgb, c3 rgb).
     var sh: MTLBuffer?
     /// "Up" from SplatForge (world_up.json or the cameras' average up), in file coordinates.
@@ -64,8 +66,9 @@ final class SplatData {
     /// Robust subsample of positions (file coordinates) used for framing and levelling.
     private let sample: [SIMD3<Float>]
 
-    init(count: Int, buffer: MTLBuffer, positions: [SIMD3<Float>]) {
+    init(count: Int, buffer: MTLBuffer, positions: [SIMD3<Float>], capacity: Int? = nil) {
         self.count = count
+        self.capacity = max(capacity ?? count, count)
         self.buffer = buffer
         self.positions = positions
         var picked: [SIMD3<Float>] = []
@@ -226,7 +229,7 @@ enum SplatLoader {
         // fmt=2 asks for float32 covariances (older Studios ignore it and send format 1).
         // fmt=2: f32 covariances · sh=1: view-dependent colour · opt=1: PC prunes floaters and sorts best-first,
         // so max=N is simply the best N splats. Older Studios ignore what they don't know.
-        guard let url = settings.url("/api/splat", query: ["ply": ply, "max": String(maxSplats), "fmt": "2", "sh": "1", "opt": "1"]) else {
+        guard let url = settings.url("/api/splat", query: ["ply": ply, "max": String(maxSplats), "fmt": "3", "sh": "1", "opt": "1"]) else {
             throw SplatLoaderError.bad("Set the PC address first")
         }
         var request = URLRequest(url: url, timeoutInterval: 300)
@@ -252,6 +255,14 @@ enum SplatLoader {
 
     static func decodeStudio(_ data: Data, device: MTLDevice) throws -> SplatData {
         guard data.count >= 16 else { throw SplatLoaderError.bad("Empty splat") }
+        if data.withUnsafeBytes({ $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }) == 3 {
+            let d = try SplatFormat3.decode(data)
+            guard let buffer = d.gs.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: d.gs.count, options: .storageModeShared) })
+            else { throw SplatLoaderError.bad("Not enough GPU memory") }
+            let result = SplatData(count: d.count, buffer: buffer, positions: d.positions)
+            result.sh = d.sh.flatMap { sh in sh.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: sh.count, options: .storageModeShared) } }
+            return result
+        }
         let n = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt32.self) })
         let version = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) })
         let hasSH = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) } == 1
@@ -398,7 +409,9 @@ struct GSUniforms {
 /// Draws splats back to front. Sorting runs on a background queue whenever the camera has moved;
 /// rendering always uses the newest finished order.
 final class GaussianSplatRenderer {
-    let splats: SplatData
+    private(set) var splats: SplatData
+    /// LOD streaming: refines chunks near the camera and swaps in a new buffer when ready.
+    var lod: SplatLOD?
     private let device: MTLDevice
     private let pipeline: MTLRenderPipelineState
     private var orderBuffers: [MTLBuffer]
@@ -458,7 +471,7 @@ final class GaussianSplatRenderer {
         descriptor.fragmentFunction = library.makeFunction(name: "gsFragment")
         descriptor.colorAttachments[1].pixelFormat = .invalid
         self.prePipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
-        self.preBuffer = device.makeBuffer(length: max(splats.count, 1) * 32, options: .storageModePrivate)
+        self.preBuffer = device.makeBuffer(length: max(splats.capacity, 1) * 32, options: .storageModePrivate)
         // Sort-free pipeline (Fastest while moving).
         let oit = MTLRenderPipelineDescriptor()
         oit.vertexFunction = library.makeFunction(name: "gsVertex")
@@ -483,34 +496,34 @@ final class GaussianSplatRenderer {
         out.sourceRGBBlendFactor = .one; out.destinationRGBBlendFactor = .oneMinusSourceAlpha
         out.sourceAlphaBlendFactor = .one; out.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         self.oitResolvePipeline = try? device.makeRenderPipelineState(descriptor: resolve)
-        if let identity = device.makeBuffer(length: splats.count * 4, options: .storageModeShared) {
-            let p = identity.contents().bindMemory(to: UInt32.self, capacity: splats.count)
-            for i in 0..<splats.count { p[i] = UInt32(i) }
+        if let identity = device.makeBuffer(length: splats.capacity * 4, options: .storageModeShared) {
+            let p = identity.contents().bindMemory(to: UInt32.self, capacity: splats.capacity)
+            for i in 0..<splats.capacity { p[i] = UInt32(i) }
             self.identityOrder = identity
         }
         var buffers: [MTLBuffer] = []
         for _ in 0..<3 {
-            guard let b = device.makeBuffer(length: splats.count * 4, options: .storageModeShared) else { return nil }
+            guard let b = device.makeBuffer(length: splats.capacity * 4, options: .storageModeShared) else { return nil }
             buffers.append(b)
         }
         // Start with the file order so something shows before the first sort finishes.
-        let first = buffers[0].contents().bindMemory(to: UInt32.self, capacity: splats.count)
-        for i in 0..<splats.count { first[i] = UInt32(i) }
+        let first = buffers[0].contents().bindMemory(to: UInt32.self, capacity: splats.capacity)
+        for i in 0..<splats.capacity { first[i] = UInt32(i) }
         self.device = device
         self.splats = splats
         self.pipeline = pipeline
         self.orderBuffers = buffers
         self.orderCounts = [splats.count, 0, 0]
-        keys = [UInt16](repeating: 0, count: splats.count)
-        depths = [Float](repeating: 0, count: splats.count)
+        keys = [UInt16](repeating: 0, count: splats.capacity)
+        depths = [Float](repeating: 0, count: splats.capacity)
         if let k = library.makeFunction(name: "gsKeys").flatMap({ try? device.makeComputePipelineState(function: $0) }),
            let sc = library.makeFunction(name: "gsScan").flatMap({ try? device.makeComputePipelineState(function: $0) }),
            let sa = library.makeFunction(name: "gsScatter").flatMap({ try? device.makeComputePipelineState(function: $0) }),
            sc.maxTotalThreadsPerThreadgroup >= 256,
-           let kb = device.makeBuffer(length: splats.count * 4, options: .storageModePrivate),
+           let kb = device.makeBuffer(length: splats.capacity * 4, options: .storageModePrivate),
            let h = device.makeBuffer(length: 65536 * 4, options: .storageModePrivate),
            let o = device.makeBuffer(length: 65536 * 4, options: .storageModePrivate),
-           let ob = device.makeBuffer(length: splats.count * 4, options: .storageModePrivate),
+           let ob = device.makeBuffer(length: splats.capacity * 4, options: .storageModePrivate),
            let a = device.makeBuffer(length: 16, options: .storageModePrivate) {
             gpu = (k, sc, sa, kb, h, o, ob, a)
         }
@@ -592,6 +605,16 @@ final class GaussianSplatRenderer {
 
     func draw(_ encoder: MTLRenderCommandEncoder, view: simd_float4x4, projection: simd_float4x4, viewport: CGSize) {
         lastViewport = viewport
+        if let lod = lod {
+            let eye = view.inverse.columns.3
+            lod.update(eye: SIMD3<Float>(eye.x, eye.y, eye.z) / eye.w, focal: projection.columns.1.y * Float(viewport.height) * 0.5)
+            if let next = lod.takeReady(), next.capacity <= splats.capacity {
+                next.orientation = splats.orientation
+                next.pcUp = splats.pcUp
+                splats = next
+                lastSortedView = nil
+            }
+        }
         if let g = gpu, let queue = commandQueue, let cb = queue.makeCommandBuffer() {
             var uniforms = GSUniforms(view: view, projection: projection,
                                       viewport: SIMD2<Float>(Float(viewport.width), Float(viewport.height)),
@@ -896,6 +919,11 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
 
     @objc private func resetTapped() { resetCamera() }
 
+    func attach(lod: SplatLOD?) {
+        renderer?.lod = lod
+        lod?.onRefined = { [weak self] in self?.setNeedsDisplay() }
+    }
+
     private var stillTimer: Timer?
     /// Light subset while a gesture runs; full quality 0.2 s after it stops.
     private func interacting(_ g: UIGestureRecognizer) {
@@ -1037,6 +1065,7 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     private var model = matrix_identity_float4x4
     private let inFlight = DispatchSemaphore(value: 3)
     func orientationChanged() { updateModel() }
+    func attach(lod: SplatLOD?) { renderer?.lod = lod; lod?.onRefined = nil }
     /// AR always moves, so it always uses the Speed setting: splats at reduced resolution, smoothly
     /// scaled up over the full-resolution camera picture.
     var speed: SplatSpeed = .balanced { didSet { renderer?.lodMinPixels = speed.lodMinPixels } }
@@ -1299,6 +1328,7 @@ struct SplatViewerScreen: View {
     @State private var inPlace = false
     @State private var resetToken = 0
     @State private var failed = false
+    @State private var lodStream: SplatLOD?
     /// Quality = how many splats are loaded. SplatForge sends them best-first, so fewer = the most visible ones.
     @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
     @AppStorage("SplatBackground") private var background = SplatBackground.black.rawValue
@@ -1320,7 +1350,7 @@ struct SplatViewerScreen: View {
                             speed: SplatSpeed(rawValue: speed) ?? .balanced,
                             occlusion: occlusion,
                             modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
-                            resetToken: resetToken, status: $status)
+                            resetToken: resetToken, lod: lodStream, status: $status)
                     .id(inPlace)
                     .ignoresSafeArea()
             } else {
@@ -1380,6 +1410,7 @@ struct SplatViewerScreen: View {
         var parts = [String(format: "%.2f M splats", Double(s.count) / 1e6)]
         if s.sh != nil { parts.append("shiny colour") }
         if s.pcUp != nil { parts.append("level from PC") }
+        if lodStream != nil { parts.insert("LOD", at: 1) }
         return parts.joined(separator: " · ")
     }
 
@@ -1518,8 +1549,16 @@ struct SplatViewerScreen: View {
             let loaded: SplatData
             switch source {
             case .studio(let ply, _, _):
-                loaded = try await SplatLoader.loadFromStudio(ply: ply, maxSplats: maxSplats, device: device) { text in
-                    Task { @MainActor in status = text }
+                // Level-of-detail streaming when the Studio offers it: coarse whole scene first, detail near you.
+                let lod = SplatLOD(ply: ply, device: device, budget: min(maxSplats, 6_000_000))
+                if let first = try? await lod.open(progress: { text in Task { @MainActor in status = text } }) {
+                    first.pcUp = lod.up
+                    loaded = first
+                    lodStream = lod
+                } else {
+                    loaded = try await SplatLoader.loadFromStudio(ply: ply, maxSplats: maxSplats, device: device) { text in
+                        Task { @MainActor in status = text }
+                    }
                 }
             case .file(let url):
                 status = "Reading file…"
@@ -1551,6 +1590,7 @@ struct SplatCanvas: UIViewRepresentable {
     let modelScale: Float
     let inPlaceMap: URL?
     var resetToken: Int = 0
+    var lod: SplatLOD?
     @Binding var status: String
 
     final class Container: UIView {
@@ -1571,7 +1611,8 @@ struct SplatCanvas: UIViewRepresentable {
             container.orbit?.removeFromSuperview()
             container.orbit = nil
             if container.ar == nil {
-                let ar = ARSplatView(device: device, splats: splats, inPlaceWorldMap: inPlaceMap)
+                let ar = ARSplatView(device: device, splats: lod?.current ?? splats, inPlaceWorldMap: inPlaceMap)
+                ar.attach(lod: lod)
                 ar.frame = container.bounds
                 ar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
                 let binding = $status
@@ -1583,6 +1624,7 @@ struct SplatCanvas: UIViewRepresentable {
             if splats.orientation != orientation {
                 splats.orientation = orientation
             }
+            lod?.setOrientation(orientation)
             container.ar?.orientationChanged()
             if container.ar?.speed != speed { container.ar?.speed = speed }
             container.ar?.occlusion = occlusion
@@ -1592,14 +1634,16 @@ struct SplatCanvas: UIViewRepresentable {
             container.ar?.removeFromSuperview()
             container.ar = nil
             if container.orbit == nil {
-                let orbit = OrbitSplatView(device: device, splats: splats)
+                let orbit = OrbitSplatView(device: device, splats: lod?.current ?? splats)
+                orbit.attach(lod: lod)
                 orbit.frame = container.bounds
                 orbit.autoresizingMask = [.flexibleWidth, .flexibleHeight]
                 container.addSubview(orbit)
                 container.orbit = orbit
             }
-            if splats.orientation != orientation {
+            if splats.orientation != orientation || (lod?.current?.orientation ?? orientation) != orientation {
                 splats.orientation = orientation
+                lod?.setOrientation(orientation)
                 container.orbit?.resetCamera()
             }
             if container.orbit?.background != background { container.orbit?.background = background }
