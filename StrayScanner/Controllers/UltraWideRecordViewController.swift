@@ -82,6 +82,16 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
     private let dockPanel = Glass.panel(cornerRadius: 34)
     private let formatButton = Glass.button(title: "1440p", symbol: nil)
     private let shutterButton = Glass.button(title: "1/250", symbol: "camera.aperture")
+    private let flashButton = Glass.button(title: nil, symbol: TorchMode.off.symbolName)
+    // Light: same modes as LiDAR scans (off / on / alternate every second with ISO calibration).
+    private var torchMode: TorchMode = .off
+    private var torchIsOn = false
+    private var torchTimer: Timer?
+    private var torchCalibrationTimer: Timer?
+    private var isoTorchOn: Float?
+    private var isoTorchOff: Float?
+    /// Settings copied from the parent scan (shown once, written to capture_settings.json).
+    private var inheritedFromParent: [String: Any] = [:]
     private let recordButton = GlassRecordButton()
     private var uiTimer: Timer?
 
@@ -113,6 +123,7 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         super.viewWillDisappear(animated)
         if recording { stopRecording() }
         uiTimer?.invalidate()
+        stopTorch()
         captureQueue.async { self.captureSession.stopRunning() }
         arSession.pause()
         altimeter.stopRelativeAltitudeUpdates()
@@ -151,7 +162,10 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
             self.captureSession.commitConfiguration()
             self.captureSession.startRunning()
             DispatchQueue.main.async {
+                self.cachedTorchDevice = self.torchDevice
+                self.inheritParentSettings()
                 self.exposureController.apply(self.shutter)
+                self.setTorchMode(self.torchMode)
                 self.updateButtons()
             }
         }
@@ -223,9 +237,10 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         let iso = device?.iso ?? 0
         let gains = device?.deviceWhiteBalanceGains
         let offset = device?.exposureTargetOffset ?? 0
+        let torch = torchDevice?.torchLevel ?? 0
         writeQueue.async {
             self.exposureFile?.write("\(time), \(number), \(exposure), \(offset), \(iso), \(gains?.redGain ?? 0), \(gains?.greenGain ?? 0), \(gains?.blueGain ?? 0)\n".data(using: .utf8)!)
-            self.qualityFile?.write(String(format: "%.6f, %@, no_tracking, , 0, %.2f, %.3f, 0, 0, 0\n", time, number, Double(angular) * 180 / Double.pi, Double(blur)).data(using: .utf8)!)
+            self.qualityFile?.write(String(format: "%.6f, %@, no_tracking, , 0, %.2f, %.3f, 0, 0, %.2f\n", time, number, Double(angular) * 180 / Double.pi, Double(blur), Double(torch)).data(using: .utf8)!)
             if fx > 0 {
                 self.intrinsicsFile?.write("\(time), \(number), \(fx), \(fy), \(cx), \(cy)\n".data(using: .utf8)!)
                 if !self.wroteCameraMatrix, let folder = self.folder {
@@ -377,6 +392,12 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         }
         if parentScan == nil { startMotion() }
         settings["parent_scan"] = parentScan?.lastPathComponent ?? NSNull()
+        settings["torch_mode"] = ["off", "on", "alternate_1s"][torchMode.rawValue]
+        if torchMode == .alternate, let on = isoTorchOn, let off = isoTorchOff {
+            settings["iso_torch_on"] = on
+            settings["iso_torch_off"] = off
+        }
+        if !inheritedFromParent.isEmpty { settings["inherited_from_parent"] = inheritedFromParent }
         settings["wide_to_ultrawide_extrinsics"] = wideToUltraWideExtrinsics() ?? NSNull()
         if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: folder.appendingPathComponent("capture_settings.json"))
@@ -405,6 +426,7 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         if parentScan != nil {
             // Close the pass: back to ARKit to anchor the end pose in the scan's coordinates.
             phase = .aligningEnd
+            stopTorch()
             captureQueue.async { self.captureSession.stopRunning() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.startAlignment() }
             pendingFinish = (folder, started)
@@ -428,6 +450,7 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         imuEncoder?.done()
         imuEncoder = nil
         exposureController.unlockAfterRecording()
+        stopTorch()
         writeQueue.sync {
             try? motionFile?.close()
             try? altitudeFile?.close()
@@ -530,6 +553,95 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
 
     // MARK: - UI
 
+    // MARK: - Light
+
+    /// The torch sits next to the wide camera; the ultra-wide device usually controls it too, else use the wide one.
+    private var cachedTorchDevice: AVCaptureDevice?
+    private var torchDevice: AVCaptureDevice? {
+        if let d = cachedTorchDevice { return d }
+        if let d = device, d.hasTorch { return d }
+        if let d = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back), d.hasTorch { return d }
+        return nil
+    }
+
+    private func setTorchLight(_ on: Bool) {
+        torchIsOn = on
+        guard let d = torchDevice else { return }
+        do {
+            try d.lockForConfiguration()
+            if on { try d.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel) }
+            else if d.isTorchModeSupported(.off) { d.torchMode = .off }
+            d.unlockForConfiguration()
+        } catch {
+            print("torch: \(error)")
+        }
+    }
+
+    @objc private func flashTapped() {
+        setTorchMode(TorchMode(rawValue: (torchMode.rawValue + 1) % 3) ?? .off)
+    }
+
+    private func setTorchMode(_ mode: TorchMode) {
+        torchMode = mode
+        torchTimer?.invalidate(); torchTimer = nil
+        torchCalibrationTimer?.invalidate(); torchCalibrationTimer = nil
+        exposureController.freezeISO = false
+        var configuration = flashButton.configuration
+        configuration?.image = UIImage(systemName: mode.symbolName)
+        flashButton.configuration = configuration
+        flashButton.accessibilityValue = mode.title
+        switch mode {
+        case .off: setTorchLight(false)
+        case .on: setTorchLight(true)
+        case .alternate:
+            // Same as LiDAR scans: meter ISO with the light off, then on, and use the lower ISO for lit frames.
+            setTorchLight(false)
+            isoTorchOff = nil; isoTorchOn = nil
+            torchCalibrationTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
+                guard let self = self else { timer.invalidate(); return }
+                if self.isoTorchOff == nil {
+                    self.isoTorchOff = self.exposureController.currentISO
+                    self.setTorchLight(true)
+                    return
+                }
+                self.isoTorchOn = self.exposureController.currentISO
+                timer.invalidate()
+                self.torchCalibrationTimer = nil
+                self.exposureController.freezeISO = true
+                self.torchTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.setTorchLight(!self.torchIsOn)
+                    if let iso = self.torchIsOn ? self.isoTorchOn : self.isoTorchOff { self.exposureController.setFixedISO(iso) }
+                }
+            }
+        }
+    }
+
+    private func stopTorch() {
+        torchTimer?.invalidate(); torchTimer = nil
+        torchCalibrationTimer?.invalidate(); torchCalibrationTimer = nil
+        exposureController.freezeISO = false
+        setTorchLight(false)
+    }
+
+    /// An add-on pass records like the scan it belongs to: same shutter and same light mode.
+    private func inheritParentSettings() {
+        guard let parent = parentScan, inheritedFromParent.isEmpty,
+              let data = try? Data(contentsOf: parent.appendingPathComponent("capture_settings.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let label = json["shutter_setting"] as? String, let s = ShutterSetting.allCases.first(where: { $0.label == label }) {
+            shutter = s
+            inheritedFromParent["shutter_setting"] = label
+        }
+        if let mode = json["torch_mode"] as? String {
+            torchMode = ["off": TorchMode.off, "on": .on, "alternate_1s": .alternate][mode] ?? .off
+            inheritedFromParent["torch_mode"] = mode
+        }
+        if !inheritedFromParent.isEmpty {
+            adviceLabel.text = "Same as the scan: \(shutter.label) s · \(torchMode.title)"
+        }
+    }
+
     @objc private func shutterTapped() {
         let all = ShutterSetting.allCases
         shutter = all[((all.firstIndex(of: shutter) ?? 0) + 1) % all.count]
@@ -565,6 +677,7 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         Glass.setTitle(formatButton, use4K ? "4K 30" : "1440p 60")
         let aligning = phase == .aligningStart || phase == .aligningEnd
         shutterButton.isEnabled = !recording && !aligning && exposureController.isAvailable
+        flashButton.isEnabled = !recording && !aligning && torchDevice != nil
         formatButton.isEnabled = !recording && !aligning
         closeButton.isEnabled = !recording && phase != .aligningEnd
         recordButton.isEnabled = !aligning
@@ -636,7 +749,9 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         recordButton.addTarget(self, action: #selector(recordTapped), for: .touchUpInside)
         shutterButton.addTarget(self, action: #selector(shutterTapped), for: .touchUpInside)
         formatButton.addTarget(self, action: #selector(formatTapped), for: .touchUpInside)
-        let row = UIStackView(arrangedSubviews: [formatButton, recordButton, shutterButton])
+        flashButton.addTarget(self, action: #selector(flashTapped), for: .touchUpInside)
+        flashButton.accessibilityLabel = "Light"
+        let row = UIStackView(arrangedSubviews: [formatButton, flashButton, recordButton, shutterButton])
         row.translatesAutoresizingMaskIntoConstraints = false
         row.axis = .horizontal
         row.alignment = .center
@@ -687,8 +802,10 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
             row.trailingAnchor.constraint(equalTo: dockPanel.contentView.trailingAnchor, constant: -18),
             recordButton.widthAnchor.constraint(equalToConstant: 82),
             recordButton.heightAnchor.constraint(equalToConstant: 82),
-            formatButton.widthAnchor.constraint(equalToConstant: 110),
-            shutterButton.widthAnchor.constraint(equalToConstant: 110),
+            formatButton.widthAnchor.constraint(equalToConstant: 96),
+            shutterButton.widthAnchor.constraint(equalToConstant: 96),
+            flashButton.widthAnchor.constraint(equalToConstant: 52),
+            flashButton.heightAnchor.constraint(equalToConstant: 52),
         ])
         updateButtons()
     }

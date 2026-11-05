@@ -126,6 +126,15 @@ struct SessionDetailView: View {
                 .glassButton()
                 .disabled(pcProgress != nil)
 
+                if let folder = folder {
+                    NavigationLink(destination: ScanReplayView(folder: folder)) {
+                        Label("All views", systemImage: "rectangle.3.group")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .glassButton()
+                }
+
                 if let folder = folder, canContinue {
                     NavigationLink(destination: NewSessionView(continueFrom: folder)) {
                         Label("Continue", systemImage: "arrow.triangle.2.circlepath")

@@ -39,6 +39,8 @@
 		70D1274C2E1800000027BEEF /* GlassControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1274A2E1800000027BEEF /* GlassControls.swift */; };
 		3863FE6425FCBB0E00C1DA4F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = 38FB73152572AF63007D9CB0 /* Shaders.metal */; };
 		3863FE6525FCBB0E00C1DA4F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385999BC25616F2B00F3F681 /* AppDelegate.swift */; };
+		5F0E1A2B3C4D5E6F70819A02 /* ScanReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0E1A2B3C4D5E6F70819A01 /* ScanReplay.swift */; };
+		5F0E1A2B3C4D5E6F70819A03 /* ScanReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0E1A2B3C4D5E6F70819A01 /* ScanReplay.swift */; };
 		3863FE6625FCBB0E00C1DA4F /* SessionDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38C17B22259D1C80006B3FDA /* SessionDetail.swift */; };
 		3863FE6825FCBB0E00C1DA4F /* Stray_Scanner.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 385999C025616F2B00F3F681 /* Stray_Scanner.xcdatamodeld */; };
 		3863FE6925FCBB0E00C1DA4F /* SessionList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38045D592561AC000004F23C /* SessionList.swift */; };
@@ -159,6 +161,7 @@
 		38ABA53C26D63239002169BD /* Info-debug.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = "Info-debug.plist"; sourceTree = "<group>"; };
 		38C17B10259BE1DA006B3FDA /* Recording+CoreDataClass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Recording+CoreDataClass.swift"; sourceTree = "<group>"; };
 		38C17B11259BE1DA006B3FDA /* Recording+CoreDataProperties.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Recording+CoreDataProperties.swift"; sourceTree = "<group>"; };
+		5F0E1A2B3C4D5E6F70819A01 /* ScanReplay.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScanReplay.swift; sourceTree = "<group>"; };
 		38C17B22259D1C80006B3FDA /* SessionDetail.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SessionDetail.swift; sourceTree = "<group>"; };
 		38E969CA2572608E00054CC4 /* NewSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSession.swift; sourceTree = "<group>"; };
 		70D1A50A2E1800000027BEEF /* UltraWideRecordViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UltraWideRecordViewController.swift; sourceTree = "<group>"; };
@@ -237,6 +240,7 @@
 				38E969CA2572608E00054CC4 /* NewSession.swift */,
 				386E277725991163007D023B /* RecordButton.swift */,
 				38C17B22259D1C80006B3FDA /* SessionDetail.swift */,
+				5F0E1A2B3C4D5E6F70819A01 /* ScanReplay.swift */,
 				387B57C125EC065600132903 /* InformationView.swift */,
 			);
 			path = Views;
@@ -577,6 +581,7 @@
 				38FB73162572AF63007D9CB0 /* Shaders.metal in Sources */,
 				385999BD25616F2B00F3F681 /* AppDelegate.swift in Sources */,
 				38C17B23259D1C80006B3FDA /* SessionDetail.swift in Sources */,
+				5F0E1A2B3C4D5E6F70819A02 /* ScanReplay.swift in Sources */,
 				385999C225616F2B00F3F681 /* Stray_Scanner.xcdatamodeld in Sources */,
 				38045D5A2561AC000004F23C /* SessionList.swift in Sources */,
 				38694C8226D2C66F00546EA1 /* AppDaemon.swift in Sources */,
@@ -622,6 +627,7 @@
 				3863FE6425FCBB0E00C1DA4F /* Shaders.metal in Sources */,
 				3863FE6525FCBB0E00C1DA4F /* AppDelegate.swift in Sources */,
 				3863FE6625FCBB0E00C1DA4F /* SessionDetail.swift in Sources */,
+				5F0E1A2B3C4D5E6F70819A03 /* ScanReplay.swift in Sources */,
 				3863FE6825FCBB0E00C1DA4F /* Stray_Scanner.xcdatamodeld in Sources */,
 				3863FE6925FCBB0E00C1DA4F /* SessionList.swift in Sources */,
 				38694C8326D2C66F00546EA1 /* AppDaemon.swift in Sources */,

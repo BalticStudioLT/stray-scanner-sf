@@ -564,11 +564,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             settings["continues_scan"] = folder.lastPathComponent
             settings["relocalized_at_start"] = relocalized
         }
-        datasetEncoder?.writeCaptureSettings(settings)
         if torchMode == .alternate, let on = isoTorchOn, let off = isoTorchOff {
             settings["iso_torch_on"] = on
             settings["iso_torch_off"] = off
         }
+        datasetEncoder?.writeCaptureSettings(settings)
         worldMapTimer?.invalidate()
         worldMapTimer = Timer.scheduledTimer(timeInterval: 20, target: self, selector: #selector(saveWorldMap), userInfo: nil, repeats: true)
         liveLink?.notifyRecording(scan: datasetEncoder?.directory.lastPathComponent, started: true)
@@ -807,6 +807,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 advice = ScanAdvice(level: .warning, text: "Continuing: point at the area you scanned last to line up", symbolName: "arrow.triangle.2.circlepath")
             } else if let pcHint = liveLink?.currentHint {
                 advice = pcHint
+            } else if startedRecording != nil, let gap = nearestPCGap() {
+                advice = gap
             } else if let guide = wallGuide.advice() {
                 advice = guide
             }
@@ -817,6 +819,46 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         blurMeter.progressTintColor = qualityMonitor.blurPixels > ScanQualityMonitor.blurBadLimit ? .systemRed
             : (qualityMonitor.blurPixels > ScanQualityMonitor.blurGoodLimit ? .systemYellow : .systemGreen)
         refreshStorage()
+    }
+
+    /// Turns the PC's gap markers (spots not yet seen from enough angles) into "where to point next".
+    private func nearestPCGap() -> ScanAdvice? {
+        guard let markers = liveLink?.markers, !markers.isEmpty, let frame = lastFrame else { return nil }
+        let camera = frame.camera.transform
+        let position = SIMD3<Float>(camera.columns.3.x, camera.columns.3.y, camera.columns.3.z)
+        let toCamera = camera.inverse
+        var best: (distance: Float, local: SIMD3<Float>)?
+        var nearby = 0
+        for marker in markers {
+            let p = SIMD3<Float>(marker.position.x, marker.position.y, marker.position.z)
+            let d = simd_distance(p, position)
+            guard d > 0.3, d < 5 else { continue }
+            nearby += 1
+            let local4 = toCamera * SIMD4<Float>(p, 1)
+            let local = SIMD3<Float>(local4.x, local4.y, local4.z)
+            // Prefer gaps roughly in front: cheap to fix without walking around.
+            let cost = d + (local.z > 0 ? 1.5 : 0)
+            if best == nil || cost < best!.distance { best = (cost, local) }
+        }
+        guard let target = best?.local else { return nil }
+        // ARKit camera axes are fixed to the sensor: +x runs toward the Home-button end (down when held upright),
+        // +y toward the phone's right edge, -z forward. Scans are filmed upright.
+        let forward = -target.z
+        let right = target.y, up = -target.x
+        let distance = simd_length(target)
+        let direction: String, symbol: String
+        if forward < 0 && abs(forward) > max(abs(right), abs(up)) {
+            direction = "behind you"; symbol = "arrow.uturn.backward"
+        } else if abs(right) > abs(up) && abs(right) > forward * 0.4 {
+            direction = right > 0 ? "to your right" : "to your left"; symbol = right > 0 ? "arrow.right" : "arrow.left"
+        } else if abs(up) > forward * 0.4 {
+            direction = up > 0 ? "higher up" : "lower down"; symbol = up > 0 ? "arrow.up" : "arrow.down"
+        } else {
+            direction = "ahead"; symbol = "scope"
+        }
+        return ScanAdvice(level: .info,
+                          text: String(format: "PC: gap %.1f m %@ — film it from another angle (%d gaps nearby)", distance, direction, nearby),
+                          symbolName: symbol)
     }
 
     private func updateTime() {
