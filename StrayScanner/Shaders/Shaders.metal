@@ -327,3 +327,133 @@ kernel void gsScatter(uint i [[thread_position_in_grid]],
     uint pos = atomic_fetch_add_explicit(&offsets[k], 1u, memory_order_relaxed);
     order[pos] = i;
 }
+
+// MARK: - Live point cloud on the GPU (recorder): unproject LiDAR depth, keep one point per 2 cm voxel,
+// track 10 cm coverage voxels and from how many directions each was seen. Replaces the CPU loop.
+
+struct PCUniforms {
+    float4x4 transform;     // camera to world (ARKit)
+    float4 intrinsics;      // fx, fy, cx, cy in depth-map pixels
+    float4 cameraPos;       // xyz
+    float2 imageScale;      // camera image pixels per depth pixel
+    uint capacity;
+    uint coverageCapacity;
+    uint stride;
+    float pointSize;
+    float maxDepth;
+    uint fineMask;          // hash table size - 1
+    uint coverageMask;
+    uint pad0, pad1, pad2;
+};
+
+struct PCCounters {
+    atomic_uint written;
+    atomic_uint coverageCount;
+    atomic_uint wellCovered;
+    uint pad;
+};
+
+static uint pcHash(int3 c) {
+    return (uint(c.x) * 73856093u) ^ (uint(c.y) * 19349663u) ^ (uint(c.z) * 83492791u);
+}
+
+static uint pcKey(int3 c) {   // 10 bits per axis (wraps every 1024 voxels), bit 30 set so 0 means empty
+    return (uint(c.x) & 0x3FFu) | ((uint(c.y) & 0x3FFu) << 10) | ((uint(c.z) & 0x3FFu) << 20) | (1u << 30);
+}
+
+/// Linear-probing insert. Returns 1 = newly inserted, 0 = already there, 2 = table full; slot = table index.
+static int pcInsert(device atomic_uint* table, uint mask, uint key, uint hash, thread uint& slot) {
+    uint h = hash & mask;
+    for (int i = 0; i < 24; i++) {
+        uint expected = 0u;
+        while (!atomic_compare_exchange_weak_explicit(&table[h], &expected, key, memory_order_relaxed, memory_order_relaxed)) {
+            if (expected != 0u) break;   // spurious failure with an empty slot: retry
+        }
+        if (expected == 0u) { slot = h; return 1; }
+        if (expected == key) { slot = h; return 0; }
+        h = (h + 1u) & mask;
+    }
+    return 2;
+}
+
+static float4 pcCoverageColor(uint views) {
+    if (views <= 1u) return float4(0.95, 0.2, 0.2, 1);
+    if (views == 2u) return float4(1.0, 0.6, 0.15, 1);
+    if (views == 3u) return float4(0.95, 0.9, 0.2, 1);
+    return float4(0.25, 0.85, 0.35, 1);
+}
+
+kernel void pcSample(uint2 gid [[thread_position_in_grid]],
+                     texture2d<float, access::read> depth [[ texture(0) ]],
+                     texture2d<uint, access::read> confidence [[ texture(1) ]],
+                     texture2d<float, access::read> lumaTex [[ texture(2) ]],
+                     texture2d<float, access::read> chromaTex [[ texture(3) ]],
+                     device SFPointVertex* points [[ buffer(0) ]],
+                     device SFPointVertex* coverage [[ buffer(1) ]],
+                     device PCCounters& counters [[ buffer(2) ]],
+                     device atomic_uint* fineTable [[ buffer(3) ]],
+                     device atomic_uint* coverageTable [[ buffer(4) ]],
+                     device atomic_uint* coverageSlots [[ buffer(5) ]],
+                     device atomic_uint* coverageMasks [[ buffer(6) ]],
+                     constant PCUniforms& u [[ buffer(7) ]]) {
+    uint2 p = gid * u.stride + u.stride / 2u;
+    if (p.x >= depth.get_width() || p.y >= depth.get_height()) return;
+    float d = depth.read(p).r;
+    if (!(d > 0.1 && d < u.maxDepth)) return;
+    if (confidence.read(p).r < 2u) return;
+    float4 local = float4((float(p.x) - u.intrinsics.z) / u.intrinsics.x * d,
+                          -(float(p.y) - u.intrinsics.w) / u.intrinsics.y * d, -d, 1.0);
+    float3 world = (u.transform * local).xyz;
+
+    // Coverage (10 cm voxels): which of 16 directions (8 compass sectors × from above / level) saw it.
+    int3 cv = int3(floor(world / 0.10));
+    uint slot;
+    int r = pcInsert(coverageTable, u.coverageMask, pcKey(cv), pcHash(cv), slot);
+    if (r != 2) {
+        uint index;
+        if (r == 1) {
+            index = atomic_fetch_add_explicit(&counters.coverageCount, 1u, memory_order_relaxed);
+            if (index < u.coverageCapacity) atomic_store_explicit(&coverageSlots[slot], index, memory_order_relaxed);
+        } else {
+            index = atomic_load_explicit(&coverageSlots[slot], memory_order_relaxed);
+        }
+        if (index < u.coverageCapacity) {
+            float3 toCam = u.cameraPos.xyz - world;
+            float len = max(length(toCam), 0.001);
+            float yaw = atan2(toCam.x, toCam.z);
+            uint sector = uint(clamp(int((yaw + M_PI_F) / (2.0 * M_PI_F) * 8.0), 0, 7));
+            uint bit = 1u << (sector + (toCam.y / len > 0.35 ? 8u : 0u));
+            uint old = atomic_fetch_or_explicit(&coverageMasks[index], bit, memory_order_relaxed);
+            if ((old & bit) == 0u) {
+                uint views = popcount(old | bit);
+                if (views == 3u) atomic_fetch_add_explicit(&counters.wellCovered, 1u, memory_order_relaxed);
+                float3 center = (float3(cv) + 0.5) * 0.10;
+                coverage[index].position = float4(center, 0.07);
+                coverage[index].color = pcCoverageColor(views);
+            }
+        }
+    }
+
+    // Display points: one per 2 cm voxel.
+    int3 fv = int3(floor(world / 0.02));
+    uint fslot;
+    if (pcInsert(fineTable, u.fineMask, pcKey(fv), pcHash(fv), fslot) != 1) return;
+    uint2 ip = min(uint2(float2(p) * u.imageScale), uint2(lumaTex.get_width() - 1, lumaTex.get_height() - 1));
+    float y = lumaTex.read(ip).r;
+    float2 cbcr = chromaTex.read(ip / 2u).rg - 0.5;
+    float3 rgb = saturate(float3(y + 1.402 * cbcr.y, y - 0.344136 * cbcr.x - 0.714136 * cbcr.y, y + 1.772 * cbcr.x));
+    uint w = atomic_fetch_add_explicit(&counters.written, 1u, memory_order_relaxed);
+    points[w % u.capacity].position = float4(world, u.pointSize);
+    points[w % u.capacity].color = float4(rgb, 1.0);
+}
+
+/// Appends one point (the camera path) through the same counter.
+kernel void pcAppend(uint i [[thread_position_in_grid]],
+                     device SFPointVertex* points [[ buffer(0) ]],
+                     device PCCounters& counters [[ buffer(2) ]],
+                     constant SFPointVertex& extra [[ buffer(3) ]],
+                     constant PCUniforms& u [[ buffer(7) ]]) {
+    if (i > 0u) return;
+    uint w = atomic_fetch_add_explicit(&counters.written, 1u, memory_order_relaxed);
+    points[w % u.capacity] = extra;
+}
