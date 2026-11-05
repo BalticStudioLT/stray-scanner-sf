@@ -13,6 +13,7 @@ import SwiftUI
 import MetalKit
 import ARKit
 import simd
+import MetalFX
 
 // MARK: - Data
 
@@ -381,7 +382,7 @@ private struct GSSortUniforms {
     var tanX: Float
     var tanY: Float
     var count: UInt32
-    var pad: UInt32 = 0
+    var lodFactor: Float = 0
 }
 
 private struct GSUniforms {
@@ -420,6 +421,8 @@ final class GaussianSplatRenderer {
     /// While the view moves, sort and draw only the most visible splats so the order keeps up with the camera
     /// (a stale order is what smears big scenes); the full set is sorted again once the view is still.
     var interactive = false
+    /// Smallest on-screen splat size (σ in pixels) still drawn; far, tiny splats are skipped. 0 = draw all.
+    var lodMinPixels: Float = 0.2
     /// GPU sort (every frame, exact order at any splat count). Falls back to the CPU sort if the kernels are missing.
     var commandQueue: MTLCommandQueue?
     private var gpu: (keys: MTLComputePipelineState, scan: MTLComputePipelineState, scatter: MTLComputePipelineState,
@@ -469,7 +472,10 @@ final class GaussianSplatRenderer {
     }
 
     /// Encodes the splats into an existing render encoder (colour target with the renderer's pixel format).
+    private var lastViewport = CGSize(width: 1000, height: 1000)
+
     func draw(_ encoder: MTLRenderCommandEncoder, view: simd_float4x4, projection: simd_float4x4, viewport: CGSize) {
+        lastViewport = viewport
         if let g = gpu, let queue = commandQueue, let cb = queue.makeCommandBuffer() {
             // Sorted on the GPU in its own command buffer, committed now — so it runs before the caller's frame.
             encodeGPUSort(cb, g, view: view, projection: projection)
@@ -521,6 +527,9 @@ final class GaussianSplatRenderer {
         let n = splats.count
         var u = GSSortUniforms(view: view, tanX: 1.6 / max(projection.columns.0.x, 0.01),
                                tanY: 1.6 / max(projection.columns.1.y, 0.01), count: UInt32(n))
+        if lodMinPixels > 0 {
+            u.lodFactor = projection.columns.1.y * Float(lastViewport.height) * 0.5 / lodMinPixels
+        }
         enc.setComputePipelineState(g.keys)
         enc.setBuffer(splats.buffer, offset: 0, index: 0)
         enc.setBuffer(g.keyBuffer, offset: 0, index: 1)
@@ -682,6 +691,14 @@ private let cameraQuad: [Float] = [
 
 // MARK: - Orbit view
 
+/// Speed vs sharpness: render resolution (MetalFX upscales to the screen) and distance LOD.
+enum SplatSpeed: String, CaseIterable {
+    case sharp, balanced, fast
+    var title: String { ["sharp": "Sharpest", "balanced": "Balanced", "fast": "Fastest"][rawValue] ?? rawValue }
+    var renderScale: Float { ["sharp": 1.0, "balanced": 0.7, "fast": 0.5][rawValue] ?? 1 }
+    var lodMinPixels: Float { ["sharp": 0.0, "balanced": 0.2, "fast": 0.4][rawValue] ?? 0 }
+}
+
 enum SplatBackground: String, CaseIterable {
     case black, grey, sky
     var title: String { ["black": "Black", "grey": "Grey", "sky": "Sky blue"][rawValue] ?? rawValue }
@@ -698,6 +715,17 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
     var background: SplatBackground = .black {
         didSet { clearColor = background.clear; setNeedsDisplay() }
     }
+    /// < 1: draw the splats at this fraction of the screen resolution and let MetalFX upscale (much less overdraw).
+    var speed: SplatSpeed = .balanced {
+        didSet {
+            renderer?.lodMinPixels = speed.lodMinPixels
+            scaler = nil
+            setNeedsDisplay()
+        }
+    }
+    private var scaler: MTLFXSpatialScaler?
+    private var lowTexture: MTLTexture?
+    private var upscaled: MTLTexture?
     private var renderer: GaussianSplatRenderer?
     private var commandQueue: MTLCommandQueue?
     private var yaw: Float = 0, pitch: Float = 0.35, distance: Float = 3
@@ -716,6 +744,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         isPaused = true
         enableSetNeedsDisplay = true
         renderer?.onSorted = { [weak self] in DispatchQueue.main.async { self?.setNeedsDisplay() } }
+        framebufferOnly = false   // the MetalFX result is copied into the drawable
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan(_:))))
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinch(_:))))
         let twoFinger = UIPanGestureRecognizer(target: self, action: #selector(twoFingerMove(_:)))
@@ -804,10 +833,59 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         let projection = ScanRenderer.perspective(fovY: Float(60.0 * Double.pi / 180.0),
                                                   aspect: Float(size.width / max(size.height, 1)),
                                                   near: max(distance * 0.01, 0.01), far: max(distance * 50, 100))
-        renderer.draw(encoder, view: viewMatrix, projection: projection, viewport: size)
-        encoder.endEncoding()
+        if speed.renderScale < 1, let device = device, prepareScaler(device: device, output: size),
+           let scaler = scaler, let low = lowTexture, let out = upscaled {
+            // Splats at reduced resolution → MetalFX spatial upscale → copy to the screen.
+            encoder.endEncoding()
+            let lowPass = MTLRenderPassDescriptor()
+            lowPass.colorAttachments[0].texture = low
+            lowPass.colorAttachments[0].loadAction = .clear
+            lowPass.colorAttachments[0].storeAction = .store
+            lowPass.colorAttachments[0].clearColor = clearColor
+            if let lowEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: lowPass) {
+                renderer.draw(lowEncoder, view: viewMatrix, projection: projection,
+                              viewport: CGSize(width: low.width, height: low.height))
+                lowEncoder.endEncoding()
+            }
+            scaler.colorTexture = low
+            scaler.outputTexture = out
+            scaler.encode(commandBuffer: commandBuffer)
+            if let blit = commandBuffer.makeBlitCommandEncoder() {
+                blit.copy(from: out, to: drawable.texture)
+                blit.endEncoding()
+            }
+        } else {
+            renderer.draw(encoder, view: viewMatrix, projection: projection, viewport: size)
+            encoder.endEncoding()
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    /// (Re)creates the MetalFX scaler and its textures for the current screen size and speed setting.
+    private func prepareScaler(device: MTLDevice, output: CGSize) -> Bool {
+        let outW = Int(output.width), outH = Int(output.height)
+        let inW = max(Int(Float(outW) * speed.renderScale), 16), inH = max(Int(Float(outH) * speed.renderScale), 16)
+        if let s = scaler, s.outputWidth == outW, s.outputHeight == outH, s.inputWidth == inW { return true }
+        guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else { return false }
+        let d = MTLFXSpatialScalerDescriptor()
+        d.inputWidth = inW; d.inputHeight = inH
+        d.outputWidth = outW; d.outputHeight = outH
+        d.colorTextureFormat = colorPixelFormat
+        d.outputTextureFormat = colorPixelFormat
+        d.colorProcessingMode = .perceptual
+        guard let s = d.makeSpatialScaler(device: device) else { return false }
+        let lowDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorPixelFormat, width: inW, height: inH, mipmapped: false)
+        lowDesc.usage = [.renderTarget, .shaderRead]
+        lowDesc.storageMode = .private
+        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorPixelFormat, width: outW, height: outH, mipmapped: false)
+        outDesc.usage = s.outputTextureUsage
+        outDesc.storageMode = .private
+        guard let low = device.makeTexture(descriptor: lowDesc), let out = device.makeTexture(descriptor: outDesc) else { return false }
+        s.inputContentWidth = inW
+        s.inputContentHeight = inH
+        scaler = s; lowTexture = low; upscaled = out
+        return true
     }
 }
 
@@ -989,6 +1067,7 @@ struct SplatViewerScreen: View {
     /// Quality = how many splats are loaded. SplatForge sends them best-first, so fewer = the most visible ones.
     @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
     @AppStorage("SplatBackground") private var background = SplatBackground.black.rawValue
+    @AppStorage("SplatSpeed") private var speed = SplatSpeed.balanced.rawValue
     private let qualities: [(String, String, Int)] = [("Draft", "0.3 M", 300_000), ("Normal", "1 M", 1_000_000),
                                                       ("High", "2 M", 2_000_000), ("Very high", "3 M", 3_000_000),
                                                       ("Everything", "All", 50_000_000)]
@@ -1002,6 +1081,7 @@ struct SplatViewerScreen: View {
             if let splats = splats {
                 SplatCanvas(splats: splats, arMode: arMode, orientation: orientation,
                             background: SplatBackground(rawValue: background) ?? .black,
+                            speed: SplatSpeed(rawValue: speed) ?? .balanced,
                             modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
                             resetToken: resetToken, status: $status)
                     .id(inPlace)
@@ -1124,6 +1204,11 @@ struct SplatViewerScreen: View {
                     Button { orientation = turn(.init(1, 0, 0), .pi / 2) * orientation } label: { Label("Tip forward 90°", systemImage: "rotate.right") }
                     Button { orientation = turn(.init(0, 0, 1), .pi / 2) * orientation } label: { Label("Tip sideways 90°", systemImage: "rotate.left") }
                 }
+                Section("Speed") {
+                    ForEach(SplatSpeed.allCases, id: \.self) { sp in
+                        Button { speed = sp.rawValue } label: { check(sp.title, speed == sp.rawValue) }
+                    }
+                }
                 if !arMode {
                     Section("Background") {
                         ForEach(SplatBackground.allCases, id: \.self) { b in
@@ -1219,6 +1304,7 @@ struct SplatCanvas: UIViewRepresentable {
     let arMode: Bool
     let orientation: simd_float3x3
     let background: SplatBackground
+    let speed: SplatSpeed
     let modelScale: Float
     let inPlaceMap: URL?
     var resetToken: Int = 0
@@ -1272,6 +1358,7 @@ struct SplatCanvas: UIViewRepresentable {
                 container.orbit?.resetCamera()
             }
             if container.orbit?.background != background { container.orbit?.background = background }
+            if container.orbit?.speed != speed { container.orbit?.speed = speed }
             if container.lastReset != resetToken {
                 container.lastReset = resetToken
                 container.orbit?.resetCamera()

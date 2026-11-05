@@ -288,7 +288,7 @@ struct GSSortUniforms {
     float tanX;         // half view width per metre of depth (with margin)
     float tanY;
     uint count;
-    uint pad;
+    float lodFactor;    // focal px / min σ px: splats smaller than that on screen are skipped (0 = off)
 };
 
 constant float GS_LOG_NEAR = -5.643856;   // log2(0.02 m)
@@ -304,7 +304,14 @@ kernel void gsKeys(uint i [[thread_position_in_grid]],
     float4 t = u.view * float4(float3(splats[i].position), 1.0);
     float d = -t.z;
     uint key = GS_CULLED;
-    if (d >= 0.02 && abs(t.x) <= d * u.tanX + 0.5 && abs(t.y) <= d * u.tanY + 0.5) {
+    bool visible = d >= 0.02 && abs(t.x) <= d * u.tanX + 0.5 && abs(t.y) <= d * u.tanY + 0.5;
+    if (visible && u.lodFactor > 0.0) {
+        // Distance LOD: far splats that cover only a sliver of a pixel are skipped (σ_screen = σ·focal/d).
+        GSplat s = splats[i];
+        float sigma2 = max(max(float(s.cov[0]), float(s.cov[3])), float(s.cov[5])) * s.covScale;
+        if (sigma2 * u.lodFactor * u.lodFactor < d * d) visible = false;
+    }
+    if (visible) {
         float f = saturate((log2(d) - GS_LOG_NEAR) / (GS_LOG_FAR - GS_LOG_NEAR));
         key = 65535u - uint(f * 65535.0);           // far = small key = drawn first
         atomic_fetch_add_explicit(&hist[key], 1u, memory_order_relaxed);

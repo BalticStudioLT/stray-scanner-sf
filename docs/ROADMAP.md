@@ -15,9 +15,9 @@ Status: ☐ not started · ◐ in progress · ☑ done
 | 4 | Windows / glass without floaters (RT-Splatting idea) — **low priority**: owner 23:51, windows already come out well; only if a test shows a problem | PC (Fable) | ☐ |
 | 5 | Mirrors (mirror plane + masks) | PC (Fable) | ☐ |
 | 6 | LiDAR-anchored training (Structured-Li-GS idea) | PC (Fable) | ☐ |
-| 7 | LOD: coarse far, detailed near, streamed chunks | PC + phone | ☐ |
+| 7 | LOD: coarse far, detailed near, streamed chunks | PC + phone (phone: distance LOD in GPU sort ☑; chunk streaming waits for PC) | ◐ |
 | 8 | Compression + web streaming (SOG / streamed SOG / SPZ) | PC (+ phone reads it) | ☐ |
-| 9 | MetalFX upscaling + variable-rate edges | phone | ☐ |
+| 9 | MetalFX upscaling + variable-rate edges | phone (MetalFX spatial ☑ in 3D view, Speed menu; temporal + VRR next) | ◐ |
 | 10 | AR occlusion: real objects (LiDAR) cover the splat | phone | ☐ |
 | 11 | Frame reuse when still / slow (battery) | phone | ☐ |
 | 12 | Better coverage guidance (area-weighted sphere of views) | phone | ☐ |

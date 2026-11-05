@@ -41,3 +41,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 23:48 (LT) "Jo pridek viska prie plano ir testavimu" → docs/ROADMAP.md (16 items with tests)
 - 2026-11-05 23:50 (LT) "Gal tokios medziagos jau yra mano skenavimuose. Mac turetu but vel prieinamas"
 - 2026-11-05 23:51 (LT) "Bet siaip kolkas su langais daug problemu nebuvo. Jie gan gerai gaunasi ant gaussian splatu" → glass item 4 set to low priority
+- 2026-11-05 23:51 "its conected" → start item 3 (masks)
+- 2026-11-05 23:52 (LT) "Pradek nuo lod, metal fx, ir kitu perfomance patobolinimu" → order changed: LOD, MetalFX, perf first; masks code parked (MotionMaskEncoder.swift, not in the build yet)
