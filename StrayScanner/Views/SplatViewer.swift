@@ -387,7 +387,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         delegate = self
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan(_:))))
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinch(_:))))
-        let twoFinger = UIPanGestureRecognizer(target: self, action: #selector(move(_:)))
+        let twoFinger = UIPanGestureRecognizer(target: self, action: #selector(twoFingerMove(_:)))
         twoFinger.minimumNumberOfTouches = 2
         addGestureRecognizer(twoFinger)
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(resetTapped))
@@ -422,7 +422,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         g.scale = 1
     }
 
-    @objc private func move(_ g: UIPanGestureRecognizer) {
+    @objc private func twoFingerMove(_ g: UIPanGestureRecognizer) {
         let d = g.translation(in: self)
         g.setTranslation(.zero, in: self)
         let right = SIMD3<Float>(cos(yaw), 0, -sin(yaw))
