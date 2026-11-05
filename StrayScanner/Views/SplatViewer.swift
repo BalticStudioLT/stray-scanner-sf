@@ -1220,8 +1220,8 @@ struct SplatCanvas: UIViewRepresentable {
     let orientation: simd_float3x3
     let background: SplatBackground
     let modelScale: Float
-    var resetToken: Int = 0
     let inPlaceMap: URL?
+    var resetToken: Int = 0
     @Binding var status: String
 
     final class Container: UIView {
