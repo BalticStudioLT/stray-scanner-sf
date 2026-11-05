@@ -76,6 +76,8 @@
 		70D1A10C2E1800000027BEEF /* PCLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1A10A2E1800000027BEEF /* PCLink.swift */; };
 		70D127FB2E1800000027BEEF /* WallSweepGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D127FA2E1800000027BEEF /* WallSweepGuide.swift */; };
 		70D127FC2E1800000027BEEF /* WallSweepGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D127FA2E1800000027BEEF /* WallSweepGuide.swift */; };
+		A1B2C3D4E5F6071829304A02 /* MotionMaskEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */; };
+		A1B2C3D4E5F6071829304A03 /* MotionMaskEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */; };
 		70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
 		70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
 		70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */; };
@@ -148,6 +150,7 @@
 		70D1270A2E1800000027BEEF /* PointCloudAccumulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PointCloudAccumulator.swift; sourceTree = "<group>"; };
 		70D1271A2E1800000027BEEF /* ScanRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanRenderer.swift; sourceTree = "<group>"; };
 		70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanQualityMonitor.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionMaskEncoder.swift; sourceTree = "<group>"; };
 		70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameQualityEncoder.swift; sourceTree = "<group>"; };
 		70D127FA2E1800000027BEEF /* WallSweepGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallSweepGuide.swift; sourceTree = "<group>"; };
 		70D1A10A2E1800000027BEEF /* PCLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCLink.swift; sourceTree = "<group>"; };
@@ -313,6 +316,7 @@
 				70D1A10A2E1800000027BEEF /* PCLink.swift */,
 				70D127FA2E1800000027BEEF /* WallSweepGuide.swift */,
 				70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */,
+				A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */,
 				70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */,
 				70D1271A2E1800000027BEEF /* ScanRenderer.swift */,
 				70D1270A2E1800000027BEEF /* PointCloudAccumulator.swift */,
@@ -594,6 +598,7 @@
 				70D1A10B2E1800000027BEEF /* PCLink.swift in Sources */,
 				70D127FB2E1800000027BEEF /* WallSweepGuide.swift in Sources */,
 				70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
+				A1B2C3D4E5F6071829304A02 /* MotionMaskEncoder.swift in Sources */,
 				70D1272B2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
 				70D1271B2E1800000027BEEF /* ScanRenderer.swift in Sources */,
 				70D1270B2E1800000027BEEF /* PointCloudAccumulator.swift in Sources */,
@@ -641,6 +646,7 @@
 				70D1A10C2E1800000027BEEF /* PCLink.swift in Sources */,
 				70D127FC2E1800000027BEEF /* WallSweepGuide.swift in Sources */,
 				70D1273C2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */,
+				A1B2C3D4E5F6071829304A03 /* MotionMaskEncoder.swift in Sources */,
 				70D1272C2E1800000027BEEF /* ScanQualityMonitor.swift in Sources */,
 				70D1271C2E1800000027BEEF /* ScanRenderer.swift in Sources */,
 				70D1270C2E1800000027BEEF /* PointCloudAccumulator.swift in Sources */,

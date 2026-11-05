@@ -443,6 +443,16 @@ final class GaussianSplatRenderer {
         attachment.sourceAlphaBlendFactor = .one
         attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return nil }
+        // Same splats, plus a second target with the composited depth (AR occlusion).
+        descriptor.fragmentFunction = library.makeFunction(name: "gsFragmentDepth")
+        let depthAttachment = descriptor.colorAttachments[1]!
+        depthAttachment.pixelFormat = .rgba16Float
+        depthAttachment.isBlendingEnabled = true
+        depthAttachment.sourceRGBBlendFactor = .one
+        depthAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        depthAttachment.sourceAlphaBlendFactor = .one
+        depthAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.depthOutPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
         var buffers: [MTLBuffer] = []
         for _ in 0..<3 {
             guard let b = device.makeBuffer(length: splats.count * 4, options: .storageModeShared) else { return nil }
@@ -473,6 +483,10 @@ final class GaussianSplatRenderer {
 
     /// Encodes the splats into an existing render encoder (colour target with the renderer's pixel format).
     private var lastViewport = CGSize(width: 1000, height: 1000)
+    private var depthOutPipeline: MTLRenderPipelineState?
+    /// Use with a render pass that has colour attachment 1 = rgba16Float (depth for AR occlusion).
+    var writesDepth = false
+    private var activePipeline: MTLRenderPipelineState { (writesDepth ? depthOutPipeline : nil) ?? pipeline }
 
     func draw(_ encoder: MTLRenderCommandEncoder, view: simd_float4x4, projection: simd_float4x4, viewport: CGSize) {
         lastViewport = viewport
@@ -484,7 +498,7 @@ final class GaussianSplatRenderer {
                                       viewport: SIMD2<Float>(Float(viewport.width), Float(viewport.height)),
                                       focal: SIMD2<Float>(projection.columns.0.x * Float(viewport.width) * 0.5,
                                                           projection.columns.1.y * Float(viewport.height) * 0.5))
-            encoder.setRenderPipelineState(pipeline)
+            encoder.setRenderPipelineState(activePipeline)
             encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(g.order, offset: 0, index: 1)
             let eye = view.inverse.columns.3
@@ -506,7 +520,7 @@ final class GaussianSplatRenderer {
                                   viewport: SIMD2<Float>(Float(viewport.width), Float(viewport.height)),
                                   focal: SIMD2<Float>(projection.columns.0.x * Float(viewport.width) * 0.5,
                                                       projection.columns.1.y * Float(viewport.height) * 0.5))
-        encoder.setRenderPipelineState(pipeline)
+        encoder.setRenderPipelineState(activePipeline)
         encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
         encoder.setVertexBuffer(order, offset: 0, index: 1)
         let eye = view.inverse.columns.3
@@ -913,6 +927,23 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     var speed: SplatSpeed = .balanced { didSet { renderer?.lodMinPixels = speed.lodMinPixels } }
     private var compositePipeline: MTLRenderPipelineState?
     private var splatTexture: MTLTexture?
+    private var splatDepthTexture: MTLTexture?
+    /// Real objects (seen by LiDAR) in front of the splat hide it.
+    var occlusion = true
+
+    private struct OcclusionUniforms {
+        var screenToImage: simd_float3x3
+        var enabled: Float
+    }
+
+    private func splatDepthTarget(like color: MTLTexture) -> MTLTexture? {
+        if let t = splatDepthTexture, t.width == color.width, t.height == color.height { return t }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: color.width, height: color.height, mipmapped: false)
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = .private
+        splatDepthTexture = device?.makeTexture(descriptor: d)
+        return splatDepthTexture
+    }
 
     private func splatTarget(for size: CGSize) -> MTLTexture? {
         let w = max(Int(Float(size.width) * speed.renderScale), 16), h = max(Int(Float(size.height) * speed.renderScale), 16)
@@ -962,7 +993,7 @@ final class ARSplatView: MTKView, MTKViewDelegate {
             cameraPipeline = try? device.makeRenderPipelineState(descriptor: camera)
             let composite = MTLRenderPipelineDescriptor()
             composite.vertexFunction = library.makeFunction(name: "fullscreenQuad")
-            composite.fragmentFunction = library.makeFunction(name: "compositePremultiplied")
+            composite.fragmentFunction = library.makeFunction(name: "compositeOccluded")
             let att = composite.colorAttachments[0]!
             att.pixelFormat = .bgra8Unorm
             att.isBlendingEnabled = true
@@ -981,6 +1012,12 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     func start() {
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal]
+        // LiDAR depth for occlusion (smoothed = steadier edges).
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            config.frameSemantics.insert(.sceneDepth)
+        }
         if let map = inPlaceMap {
             config.initialWorldMap = map
             session.run(config)
@@ -1045,13 +1082,21 @@ final class ARSplatView: MTKView, MTKViewDelegate {
         // Splats at reduced resolution first (own pass, transparent background), composited after the camera.
         let showInPlaceNow = inPlaceMap != nil && relocalized
         var lowSplats: MTLTexture?
-        if speed.renderScale < 1, compositePipeline != nil, let renderer = renderer,
-           placement != nil || showInPlaceNow, let target = splatTarget(for: drawableSize) {
+        var lowDepth: MTLTexture?
+        if compositePipeline != nil, let renderer = renderer,
+           placement != nil || showInPlaceNow, let target = splatTarget(for: drawableSize),
+           let depthTarget = splatDepthTarget(like: target) {
             let lowPass = MTLRenderPassDescriptor()
             lowPass.colorAttachments[0].texture = target
             lowPass.colorAttachments[0].loadAction = .clear
             lowPass.colorAttachments[0].storeAction = .store
             lowPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            lowPass.colorAttachments[1].texture = depthTarget
+            lowPass.colorAttachments[1].loadAction = .clear
+            lowPass.colorAttachments[1].storeAction = .store
+            lowPass.colorAttachments[1].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            renderer.writesDepth = true
+            lowDepth = depthTarget
             if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: lowPass) {
                 let viewMatrix = frame.camera.viewMatrix(for: .portrait) * (showInPlaceNow ? matrix_identity_float4x4 : model)
                 let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: drawableSize, zNear: 0.03, zFar: 200)
@@ -1059,6 +1104,18 @@ final class ARSplatView: MTKView, MTKViewDelegate {
                 enc.endEncoding()
                 lowSplats = target
             }
+            renderer.writesDepth = false
+            if lowSplats == nil {
+                lowDepth = nil
+            }
+        }
+        func texture2(_ buffer: CVPixelBuffer, _ format: MTLPixelFormat) -> MTLTexture? {
+            var cv: CVMetalTexture?
+            CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, buffer, nil, format,
+                                                      CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer), 0, &cv)
+            guard let t = cv else { return nil }
+            keep.append(t)
+            return CVMetalTextureGetTexture(t)
         }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
@@ -1080,6 +1137,16 @@ final class ARSplatView: MTKView, MTKViewDelegate {
             if let low = lowSplats, let composite = compositePipeline {
                 encoder.setRenderPipelineState(composite)
                 encoder.setFragmentTexture(low, index: 0)
+                encoder.setFragmentTexture(lowDepth, index: 1)
+                let depthMap = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap
+                let real = depthMap.flatMap { texture2($0, .r32Float) }
+                encoder.setFragmentTexture(real ?? lowDepth, index: 2)
+                let t = frame.displayTransform(for: .portrait, viewportSize: drawableSize).inverted()
+                var u = OcclusionUniforms(screenToImage: simd_float3x3(SIMD3(Float(t.a), Float(t.b), 0),
+                                                                        SIMD3(Float(t.c), Float(t.d), 0),
+                                                                        SIMD3(Float(t.tx), Float(t.ty), 1)),
+                                          enabled: occlusion && real != nil ? 1 : 0)
+                encoder.setFragmentBytes(&u, length: MemoryLayout<OcclusionUniforms>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             } else if let renderer = renderer, placement != nil || showInPlace {
                 let size = drawableSize
@@ -1121,6 +1188,7 @@ struct SplatViewerScreen: View {
     @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
     @AppStorage("SplatBackground") private var background = SplatBackground.black.rawValue
     @AppStorage("SplatSpeed") private var speed = SplatSpeed.balanced.rawValue
+    @AppStorage("SplatOcclusion") private var occlusion = true
     private let qualities: [(String, String, Int)] = [("Draft", "0.3 M", 300_000), ("Normal", "1 M", 1_000_000),
                                                       ("High", "2 M", 2_000_000), ("Very high", "3 M", 3_000_000),
                                                       ("Everything", "All", 50_000_000)]
@@ -1135,6 +1203,7 @@ struct SplatViewerScreen: View {
                 SplatCanvas(splats: splats, arMode: arMode, orientation: orientation,
                             background: SplatBackground(rawValue: background) ?? .black,
                             speed: SplatSpeed(rawValue: speed) ?? .balanced,
+                            occlusion: occlusion,
                             modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
                             resetToken: resetToken, status: $status)
                     .id(inPlace)
@@ -1257,6 +1326,11 @@ struct SplatViewerScreen: View {
                     Button { orientation = turn(.init(1, 0, 0), .pi / 2) * orientation } label: { Label("Tip forward 90°", systemImage: "rotate.right") }
                     Button { orientation = turn(.init(0, 0, 1), .pi / 2) * orientation } label: { Label("Tip sideways 90°", systemImage: "rotate.left") }
                 }
+                if arMode {
+                    Section("AR") {
+                        Button { occlusion.toggle() } label: { check("Real things hide the scan (LiDAR)", occlusion) }
+                    }
+                }
                 Section("Speed") {
                     ForEach(SplatSpeed.allCases, id: \.self) { sp in
                         Button { speed = sp.rawValue } label: { check(sp.title, speed == sp.rawValue) }
@@ -1358,6 +1432,7 @@ struct SplatCanvas: UIViewRepresentable {
     let orientation: simd_float3x3
     let background: SplatBackground
     let speed: SplatSpeed
+    let occlusion: Bool
     let modelScale: Float
     let inPlaceMap: URL?
     var resetToken: Int = 0
@@ -1395,6 +1470,7 @@ struct SplatCanvas: UIViewRepresentable {
             }
             container.ar?.orientationChanged()
             if container.ar?.speed != speed { container.ar?.speed = speed }
+            container.ar?.occlusion = occlusion
             container.ar?.modelScale = modelScale
         } else {
             container.ar?.stop()

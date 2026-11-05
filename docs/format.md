@@ -178,3 +178,15 @@ Extra files in a pass (besides the ultra-wide files above):
 `[R | t]` from the wide to the ultra-wide camera, metres; `null` if unavailable). Suggested alignment: pose_uw(t) =
 anchor pose × attitude(anchor)⁻¹ × attitude(t) × extrinsics, used as an initial guess for SfM / registration against the
 LiDAR splat; the start and end anchors bound gyro drift.
+
+## Masks: people and moving objects (stray-scanner-sf fork)
+
+| File | Content |
+|---|---|
+| `masks/<frame>.png` | 8-bit grey, 256×192 — same size and orientation as `depth/<frame>.png`. 255 = leave out of training (person or something that moved), 0 = static scene. Only written for frames where something was found (≥ 0.2 % of the image), 2 px dilated. Scale it up to the video frame size (nearest) to use it. |
+| `masks.csv` | `frame, moving_fraction, person_fraction` for every frame that was checked (about 5 per second; frames in between were not checked). |
+
+How: people come from Vision person segmentation; other moving things from optical flow (Vision, Neural Engine)
+between two checked frames compared with the flow the camera's own motion would cause over the LiDAR depth — pixels
+that move differently (> 3 px or > 35 %) are moving. Runs in the background and skips frames when busy, so it never
+slows recording. Frame numbers are the same as in `odometry.csv` / `depth/`.

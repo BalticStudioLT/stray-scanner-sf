@@ -209,6 +209,7 @@ struct GSOut {
     float4 position [[position]];
     float2 local;       // position inside the splat in standard deviations
     half4 color;
+    float viewDepth;    // metres in front of the camera (for AR occlusion)
 };
 
 vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
@@ -269,6 +270,24 @@ vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float2 ndc = offsetPx / (u.viewport * 0.5);
     o.position = clip + float4(ndc * clip.w, 0.0, 0.0);
     o.local = corner * k;
+    o.viewDepth = d;
+    return o;
+}
+
+struct GSDepthOut {
+    half4 color [[color(0)]];
+    half4 depth [[color(1)]];   // r = depth·alpha, a = alpha; blended like colour → r/a = composited depth
+};
+
+fragment GSDepthOut gsFragmentDepth(GSOut in [[stage_in]]) {
+    half r2 = half(dot(in.local, in.local));
+    half alpha = in.color.a * exp(-0.5h * r2);
+    if (alpha < half(1.0 / 255.0)) {
+        discard_fragment();
+    }
+    GSDepthOut o;
+    o.color = half4(in.color.rgb * alpha, alpha);
+    o.depth = half4(half(in.viewDepth) * alpha, 0.0h, 0.0h, alpha);
     return o;
 }
 
@@ -502,6 +521,30 @@ vertex CompositeOut fullscreenQuad(uint vid [[vertex_id]]) {
     o.position = float4(p, 0.0, 1.0);
     o.uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
     return o;
+}
+
+struct OcclusionUniforms {
+    float3x3 screenToImage;   // screen uv → camera image uv (ARKit displayTransform, inverted)
+    float enabled;
+};
+
+/// Splats over the camera, hidden where the LiDAR sees something real closer than the splat (hand, person, table).
+fragment half4 compositeOccluded(CompositeOut in [[stage_in]],
+                                 texture2d<half, access::sample> splats [[ texture(0) ]],
+                                 texture2d<half, access::sample> splatDepth [[ texture(1) ]],
+                                 texture2d<float, access::sample> realDepth [[ texture(2) ]],
+                                 constant OcclusionUniforms& u [[ buffer(0) ]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    half4 c = splats.sample(s, in.uv);
+    if (u.enabled < 0.5 || c.a < 0.01h) return c;
+    half4 sd = splatDepth.sample(s, in.uv);
+    float splatD = float(sd.r) / max(float(sd.a), 1e-3);
+    float2 imageUV = (u.screenToImage * float3(in.uv, 1.0)).xy;
+    float real = realDepth.sample(s, imageUV).r;
+    if (real <= 0.0) return c;
+    // Fade over 6 cm so edges don't flicker.
+    float visible = saturate((real - splatD) / 0.06 + 1.0);
+    return c * half(visible);
 }
 
 fragment half4 compositePremultiplied(CompositeOut in [[stage_in]],

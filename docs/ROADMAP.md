@@ -11,15 +11,15 @@ Status: ☐ not started · ◐ in progress · ☑ done
 |---|---|---|---|
 | 1 | Live PC preview splat while scanning | PC + phone (phone ☑) | ◐ |
 | 2 | Actionable live tips, target spot, end verdict | PC + phone (phone ☑) | ◐ |
-| 3 | Masks: moving objects (optical flow), sky, glass, mirrors | phone → PC | ☐ |
+| 3 | Masks: moving objects (optical flow), sky, glass, mirrors | phone → PC (phone: people + moving objects ☑, masks/ + masks.csv; sky/glass/mirror later; PC must use them) | ◐ |
 | 4 | Windows / glass without floaters (RT-Splatting idea) — **low priority**: owner 23:51, windows already come out well; only if a test shows a problem | PC (Fable) | ☐ |
 | 5 | Mirrors (mirror plane + masks) | PC (Fable) | ☐ |
 | 6 | LiDAR-anchored training (Structured-Li-GS idea) | PC (Fable) | ☐ |
 | 7 | LOD: coarse far, detailed near, streamed chunks | PC + phone (phone: distance LOD in GPU sort ☑; chunk streaming waits for PC) | ◐ |
 | 8 | Compression + web streaming (SOG / streamed SOG / SPZ) | PC (+ phone reads it) | ☐ |
-| 9 | MetalFX upscaling + variable-rate edges | phone (MetalFX spatial ☑ in 3D view, Speed menu; temporal + VRR next) | ◐ |
-| 10 | AR occlusion: real objects (LiDAR) cover the splat | phone | ☐ |
-| 11 | Frame reuse when still / slow (battery) | phone | ☐ |
+| 9 | MetalFX upscaling + variable-rate edges | phone (MetalFX spatial ☑, dynamic resolution ☑ — full quality when still; AR at reduced res ☑; temporal/VRR not needed for now) | ☑ |
+| 10 | AR occlusion: real objects (LiDAR) cover the splat | phone | ☑ (needs owner test) |
+| 11 | Frame reuse when still / slow (battery) | phone (3D view draws only on change ☑; recorder preview at 30 fps ☑) | ☑ |
 | 12 | Better coverage guidance (area-weighted sphere of views) | phone | ☐ |
 | 13 | Automatic guided-tour route from path + pins | PC | ☐ |
 | 14 | Enhancement during training (Difix3D+ idea), per-job switch | PC (Fable) | ☐ |

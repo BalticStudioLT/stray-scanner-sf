@@ -27,6 +27,8 @@ class DatasetEncoder {
     private let exposureEncoder: ExposureEncoder
     private let exposureController: ExposureController?
     private let frameQualityEncoder: FrameQualityEncoder
+    /// People and other moving things to leave out of training (masks/ + masks.csv).
+    private let maskEncoder: MotionMaskEncoder
     private let markerEncoder: MarkerEncoder
     /// Frames skipped because the encoder was still busy with earlier ones.
     public private(set) var droppedFrames: Int = 0
@@ -84,6 +86,7 @@ class DatasetEncoder {
         self.exposureEncoder = ExposureEncoder(url: self.exposurePath)
         self.captureSettingsPath = datasetDirectory.appendingPathComponent("capture_settings.json", isDirectory: false)
         self.frameQualityEncoder = FrameQualityEncoder(url: datasetDirectory.appendingPathComponent("frame_quality.csv", isDirectory: false))
+        self.maskEncoder = MotionMaskEncoder(directory: datasetDirectory)
         self.markerEncoder = MarkerEncoder(url: datasetDirectory.appendingPathComponent("markers.csv", isDirectory: false))
         // Marks the scan as unfinished until wrapUp(); a scan left with this file after a crash
         // is recovered on the next launch (see AppDaemon).
@@ -148,6 +151,7 @@ class DatasetEncoder {
         savedFrames = savedFrames + 1
         // Read ISO / white balance now, at frame arrival, not later on the encoding queue.
         let exposureSnapshot = exposureController?.snapshot()
+        maskEncoder.add(frame: frame, frameNumber: frameNumber)
         dispatchGroup.enter()
         queue.async {
             defer {
@@ -216,6 +220,7 @@ class DatasetEncoder {
         self.distortionEncoder.done()
         self.exposureEncoder.done()
         self.frameQualityEncoder.done()
+        self.maskEncoder.done()
         queue.sync {
             self.markerEncoder.done()
         }
