@@ -488,3 +488,24 @@ kernel void pcAppend(uint i [[thread_position_in_grid]],
     uint w = atomic_fetch_add_explicit(&counters.written, 1u, memory_order_relaxed);
     points[w % u.capacity] = extra;
 }
+
+// MARK: - Reduced-resolution splats composited over the AR camera picture
+
+struct CompositeOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex CompositeOut fullscreenQuad(uint vid [[vertex_id]]) {
+    float2 p = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
+    CompositeOut o;
+    o.position = float4(p, 0.0, 1.0);
+    o.uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    return o;
+}
+
+fragment half4 compositePremultiplied(CompositeOut in [[stage_in]],
+                                      texture2d<half, access::sample> splats [[ texture(0) ]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    return splats.sample(s, in.uv);   // premultiplied: blended with one / one-minus-source-alpha
+}

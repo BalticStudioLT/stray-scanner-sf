@@ -833,7 +833,12 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         let projection = ScanRenderer.perspective(fovY: Float(60.0 * Double.pi / 180.0),
                                                   aspect: Float(size.width / max(size.height, 1)),
                                                   near: max(distance * 0.01, 0.01), far: max(distance * 50, 100))
-        if speed.renderScale < 1, let device = device, prepareScaler(device: device, output: size),
+        // Dynamic resolution: while you drag, the Speed setting (lower resolution + MetalFX, distance LOD);
+        // once the view is still, one frame at full resolution with every splat — sharp at no ongoing cost,
+        // because the 3D view only redraws when something changes.
+        let moving = renderer.interactive
+        renderer.lodMinPixels = moving ? speed.lodMinPixels : 0
+        if moving, speed.renderScale < 1, let device = device, prepareScaler(device: device, output: size),
            let scaler = scaler, let low = lowTexture, let out = upscaled {
             // Splats at reduced resolution → MetalFX spatial upscale → copy to the screen.
             encoder.endEncoding()
@@ -903,6 +908,21 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     private var model = matrix_identity_float4x4
     private let inFlight = DispatchSemaphore(value: 3)
     func orientationChanged() { updateModel() }
+    /// AR always moves, so it always uses the Speed setting: splats at reduced resolution, smoothly
+    /// scaled up over the full-resolution camera picture.
+    var speed: SplatSpeed = .balanced { didSet { renderer?.lodMinPixels = speed.lodMinPixels } }
+    private var compositePipeline: MTLRenderPipelineState?
+    private var splatTexture: MTLTexture?
+
+    private func splatTarget(for size: CGSize) -> MTLTexture? {
+        let w = max(Int(Float(size.width) * speed.renderScale), 16), h = max(Int(Float(size.height) * speed.renderScale), 16)
+        if let t = splatTexture, t.width == w, t.height == h { return t }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = .private
+        splatTexture = device?.makeTexture(descriptor: d)
+        return splatTexture
+    }
     /// 1 = real size (walk inside), 0.1 = 1:10 model, …
     var modelScale: Float = 1 { didSet { updateModel() } }
     var onStatus: ((String) -> Void)?
@@ -940,6 +960,17 @@ final class ARSplatView: MTKView, MTKViewDelegate {
             camera.vertexDescriptor = d
             camera.colorAttachments[0].pixelFormat = .bgra8Unorm
             cameraPipeline = try? device.makeRenderPipelineState(descriptor: camera)
+            let composite = MTLRenderPipelineDescriptor()
+            composite.vertexFunction = library.makeFunction(name: "fullscreenQuad")
+            composite.fragmentFunction = library.makeFunction(name: "compositePremultiplied")
+            let att = composite.colorAttachments[0]!
+            att.pixelFormat = .bgra8Unorm
+            att.isBlendingEnabled = true
+            att.sourceRGBBlendFactor = .one
+            att.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            att.sourceAlphaBlendFactor = .one
+            att.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            compositePipeline = try? device.makeRenderPipelineState(descriptor: composite)
         }
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
         addGestureRecognizer(UIRotationGestureRecognizer(target: self, action: #selector(rotated(_:))))
@@ -1011,6 +1042,24 @@ final class ARSplatView: MTKView, MTKViewDelegate {
             keep.append(t)
             return CVMetalTextureGetTexture(t)
         }
+        // Splats at reduced resolution first (own pass, transparent background), composited after the camera.
+        let showInPlaceNow = inPlaceMap != nil && relocalized
+        var lowSplats: MTLTexture?
+        if speed.renderScale < 1, compositePipeline != nil, let renderer = renderer,
+           placement != nil || showInPlaceNow, let target = splatTarget(for: drawableSize) {
+            let lowPass = MTLRenderPassDescriptor()
+            lowPass.colorAttachments[0].texture = target
+            lowPass.colorAttachments[0].loadAction = .clear
+            lowPass.colorAttachments[0].storeAction = .store
+            lowPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: lowPass) {
+                let viewMatrix = frame.camera.viewMatrix(for: .portrait) * (showInPlaceNow ? matrix_identity_float4x4 : model)
+                let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: drawableSize, zNear: 0.03, zFar: 200)
+                renderer.draw(enc, view: viewMatrix, projection: projection, viewport: CGSize(width: target.width, height: target.height))
+                enc.endEncoding()
+                lowSplats = target
+            }
+        }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
@@ -1028,7 +1077,11 @@ final class ARSplatView: MTKView, MTKViewDelegate {
                 DispatchQueue.main.async { self.onStatus?("In place: the scan is drawn where it was recorded") }
             }
             let showInPlace = inPlaceMap != nil && relocalized
-            if let renderer = renderer, placement != nil || showInPlace {
+            if let low = lowSplats, let composite = compositePipeline {
+                encoder.setRenderPipelineState(composite)
+                encoder.setFragmentTexture(low, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            } else if let renderer = renderer, placement != nil || showInPlace {
                 let size = drawableSize
                 let viewMatrix = frame.camera.viewMatrix(for: .portrait) * (showInPlace ? matrix_identity_float4x4 : model)
                 let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: size, zNear: 0.03, zFar: 200)
@@ -1341,6 +1394,7 @@ struct SplatCanvas: UIViewRepresentable {
                 splats.orientation = orientation
             }
             container.ar?.orientationChanged()
+            if container.ar?.speed != speed { container.ar?.speed = speed }
             container.ar?.modelScale = modelScale
         } else {
             container.ar?.stop()
