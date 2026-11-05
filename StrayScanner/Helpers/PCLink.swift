@@ -144,7 +144,33 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
     }
 
     /// Zips the scan folder and uploads it. Safe to call from the main thread.
+    private static let uploadedKey = "PCUploadedScans"
+    static func wasUploaded(_ name: String) -> Bool {
+        return (UserDefaults.standard.stringArray(forKey: uploadedKey) ?? []).contains(name)
+    }
+    private static func markUploaded(_ name: String) {
+        var names = UserDefaults.standard.stringArray(forKey: uploadedKey) ?? []
+        if !names.contains(name) { names.append(name) }
+        UserDefaults.standard.set(names, forKey: uploadedKey)
+    }
+
+    /// A continued scan is merged on the PC with the scan it continues, so that one has to be there first:
+    /// upload the chain oldest-first when an earlier part was never sent.
     func upload(directory: URL) {
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("capture_settings.json")),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let parentName = json["continues_scan"] as? String, !PCUploader.wasUploaded(parentName) {
+            let parent = directory.deletingLastPathComponent().appendingPathComponent(parentName, isDirectory: true)
+            if FileManager.default.fileExists(atPath: parent.path) {
+                report(directory.lastPathComponent, 0, "Sending the earlier part (\(parentName.prefix(8))…) first")
+                upload(directory: parent, then: { [weak self] in self?.upload(directory: directory) })
+                return
+            }
+        }
+        upload(directory: directory, then: nil)
+    }
+
+    private func upload(directory: URL, then next: (() -> Void)?) {
         let settings = PCLinkSettings.load()
         let name = directory.lastPathComponent
         let recipe = UserDefaults.standard.bool(forKey: "PCLinkDraft") ? "draft" : "base"
@@ -176,6 +202,8 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
                     if let error = error {
                         self.report(name, nil, "Upload failed: \(error.localizedDescription)")
                     } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                        PCUploader.markUploaded(name)
+                        next?()
                         self.report(name, nil, "Sent to PC — preparing frames…")
                         self.follow(scan: name, settings: settings, attempt: 0)
                     } else {
