@@ -172,6 +172,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let pcSettings = PCLinkSettings.load()
         if pcSettings.live, let link = PCLiveLink(settings: pcSettings) {
             liveLink = link
+            link.onSummary = { [weak self] good, text in
+                guard let self = self, self.viewIfLoaded?.window != nil else { return }
+                let alert = UIAlertController(title: good ? "PC: good to train" : "PC: rescan needed", message: text, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+            }
             link.connect(scanName: nil, frame: nil)
         }
         uiTimer?.invalidate()
@@ -787,6 +793,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     // MARK: - HUD
 
     @objc private func uiTick() {
+        refreshPCPreview()
         updateTime()
         updateTracking()
         updateStatsText()
@@ -821,7 +828,38 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     /// Turns the PC's gap markers (spots not yet seen from enough angles) into "where to point next".
+    private var shownPreviewVersion = 0
+
+    /// New preview splat from the PC → hand it to the renderer (the "PC preview" view and its small view).
+    private func refreshPCPreview() {
+        guard let link = liveLink, link.previewVersion != shownPreviewVersion else { return }
+        shownPreviewVersion = link.previewVersion
+        renderer?.setPreview(link.previewSplats)
+        if viewMode != .pcPreview {
+            applyAdvice(ScanAdvice(level: .good, text: "PC preview updated — tap the PC view to see it", symbolName: "desktopcomputer"))
+        }
+    }
+
+    /// Where the PC wants you to go next (its target first, else the nearest gap marker).
+    private func pcTargetAdvice() -> ScanAdvice? {
+        guard let target = liveLink?.target, let frame = lastFrame else { return nil }
+        let local4 = frame.camera.transform.inverse * SIMD4<Float>(target.point, 1)
+        let (direction, symbol) = describeDirection(SIMD3<Float>(local4.x, local4.y, local4.z))
+        let distance = simd_length(SIMD3<Float>(local4.x, local4.y, local4.z))
+        return ScanAdvice(level: .info, text: String(format: "PC: %@ — %.1f m %@", target.text, distance, direction), symbolName: symbol)
+    }
+
+    private func describeDirection(_ target: SIMD3<Float>) -> (String, String) {
+        let forward = -target.z, right = target.y, up = -target.x
+        if forward < 0 && abs(forward) > max(abs(right), abs(up)) { return ("behind you", "arrow.uturn.backward") }
+        if abs(right) > abs(up) && abs(right) > forward * 0.4 { return right > 0 ? ("to your right", "arrow.right") : ("to your left", "arrow.left") }
+        if abs(up) > forward * 0.4 { return up > 0 ? ("higher up", "arrow.up") : ("lower down", "arrow.down") }
+        return ("ahead", "scope")
+    }
+
     private func nearestPCGap() -> ScanAdvice? {
+        refreshPCPreview()
+        if let target = pcTargetAdvice() { return target }
         guard let markers = liveLink?.markers, !markers.isEmpty, let frame = lastFrame else { return nil }
         let camera = frame.camera.transform
         let position = SIMD3<Float>(camera.columns.3.x, camera.columns.3.y, camera.columns.3.z)

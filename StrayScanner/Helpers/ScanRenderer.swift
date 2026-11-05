@@ -18,9 +18,11 @@ enum ViewMode: Int, CaseIterable {
     case pointCloud = 3
     case dim = 4
     case map = 5
+    /// The PC's live preview splat (trained while you scan), seen from where the phone is now.
+    case pcPreview = 6
 
     /// Order of the view picker (map before dim).
-    static let displayOrder: [ViewMode] = [.camera, .depth, .overlay, .pointCloud, .map, .dim]
+    static let displayOrder: [ViewMode] = [.camera, .depth, .overlay, .pointCloud, .map, .pcPreview, .dim]
 
     static let userDefaultsKey = "ViewMode"
 
@@ -32,6 +34,7 @@ enum ViewMode: Int, CaseIterable {
         case .pointCloud: return "Points"
         case .dim: return "Dim"
         case .map: return "Map"
+        case .pcPreview: return "PC preview"
         }
     }
 
@@ -43,6 +46,7 @@ enum ViewMode: Int, CaseIterable {
         case .pointCloud: return "circle.grid.3x3.fill"
         case .dim: return "moon.fill"
         case .map: return "map.fill"
+        case .pcPreview: return "desktopcomputer"
         }
     }
 
@@ -194,6 +198,16 @@ final class ScanRenderer {
         self.pointCloud = pointCloud
     }
 
+    /// Live preview splat from the PC (ARKit coordinates of this session).
+    private var preview: GaussianSplatRenderer?
+    func setPreview(_ splats: SplatData?) {
+        guard let splats = splats else { preview = nil; return }
+        let r = GaussianSplatRenderer(device: device, splats: splats, colorFormat: .bgra8Unorm)
+        r?.commandQueue = commandQueue
+        preview = r
+    }
+    var hasPreview: Bool { preview != nil }
+
     func render(frame: ARFrame) {
         frameNumber += 1
         // Always grow the point cloud so switching to it shows the whole scan so far.
@@ -312,6 +326,19 @@ final class ScanRenderer {
             encoder.endEncoding()
         case .map:
             encodeMinimap(commandBuffer, drawable: drawable, frame: frame, size: size)
+        case .pcPreview:
+            guard let preview = preview else {
+                // Nothing from the PC yet: show the camera.
+                encode(mode: .camera, commandBuffer, drawable: drawable, frame: frame, textures: textures, size: size, isInset: isInset)
+                return
+            }
+            let pass = colorPass(drawable, withDepth: false)
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1)
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+            let view = frame.camera.viewMatrix(for: .portrait)
+            let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: size, zNear: 0.03, zFar: 100)
+            preview.draw(encoder, view: view, projection: projection, viewport: size)
+            encoder.endEncoding()
         case .dim:
             break
         }

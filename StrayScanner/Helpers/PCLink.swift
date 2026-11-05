@@ -308,6 +308,13 @@ final class PCLiveLink {
     private(set) var statusText: String = "PC: connecting…"
     /// Extra markers the PC asks to show (e.g. coverage gaps), world space.
     private(set) var markers: [PointCloudVertex] = []
+    /// One spot the PC wants filmed next (world space) and why.
+    private(set) var target: (point: SIMD3<Float>, text: String)?
+    /// The PC's live preview splat (trained while scanning) and its version.
+    private(set) var previewSplats: SplatData?
+    private(set) var previewVersion = 0
+    /// Verdict after recording_stopped: {"verdict": "good" | "rescan", "text": …}.
+    var onSummary: ((_ good: Bool, _ text: String) -> Void)?
 
     init?(settings: PCLinkSettings) {
         guard settings.isConfigured else { return nil }
@@ -474,6 +481,26 @@ final class PCLiveLink {
         }
     }
 
+    private var fetchingPreview = false
+    private func fetchPreview(path: String, version: Int) {
+        guard !fetchingPreview, let base = settings.url("/"),
+              let url = URL(string: path, relativeTo: base)?.absoluteURL,
+              let device = MTLCreateSystemDefaultDevice() else { return }
+        fetchingPreview = true
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.setValue(settings.token, forHTTPHeaderField: "X-Token")
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            let splats = data.flatMap { (response as? HTTPURLResponse)?.statusCode == 200 ? try? SplatLoader.decodeStudio($0, device: device) : nil }
+            DispatchQueue.main.async {
+                self.fetchingPreview = false
+                if let splats = splats {
+                    self.previewSplats = splats
+                    self.previewVersion = version
+                }
+            }
+        }.resume()
+    }
+
     /// Plain-language reason why the live link is down.
     static func explain(_ error: Error, host: String, port: Int) -> String {
         let code = (error as NSError).code
@@ -519,10 +546,26 @@ final class PCLiveLink {
                 let color = (json["color"] as? [Double]) ?? [1, 0, 1]
                 let rgba = SIMD4<Float>(Float(color[safe: 0] ?? 1), Float(color[safe: 1] ?? 0), Float(color[safe: 2] ?? 1), 1)
                 let points = (json["points"] as? [[Double]]) ?? []
-                self.markers = points.prefix(2000).compactMap { p in
+                let colors = json["colors"] as? [[Double]]   // optional per-point colour (e.g. render error)
+                self.markers = points.prefix(2000).enumerated().compactMap { i, p in
                     guard p.count >= 3 else { return nil }
-                    return PointCloudVertex(position: SIMD4<Float>(Float(p[0]), Float(p[1]), Float(p[2]), 0.06), color: rgba)
+                    var c = rgba
+                    if let pc = colors?[safe: i], pc.count >= 3 { c = SIMD4<Float>(Float(pc[0]), Float(pc[1]), Float(pc[2]), 1) }
+                    return PointCloudVertex(position: SIMD4<Float>(Float(p[0]), Float(p[1]), Float(p[2]), 0.06), color: c)
                 }
+            case "target":
+                if let p = json["point"] as? [Double], p.count >= 3 {
+                    self.target = (SIMD3<Float>(Float(p[0]), Float(p[1]), Float(p[2])), (json["text"] as? String) ?? "Film this spot")
+                } else {
+                    self.target = nil
+                }
+            case "summary":
+                let good = (json["verdict"] as? String) == "good"
+                self.onSummary?(good, (json["text"] as? String) ?? (good ? "Good to train" : "Some areas need rescanning"))
+            case "preview":
+                // {"type":"preview","version":n,"path":"/stray/live/preview?…"}: fetch the new draft splat.
+                let version = (json["version"] as? Int) ?? (self.previewVersion + 1)
+                if let path = json["path"] as? String, version > self.previewVersion { self.fetchPreview(path: path, version: version) }
             default:
                 break
             }
