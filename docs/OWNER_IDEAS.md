@@ -26,3 +26,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 20:27 "Can we optimize engine?" (splat viewer)
 - 2026-11-05 20:51 (screenshot: 4 M splats dotnuva_tractor, smeared/blurry while moving, big blobs near camera) "More moving smedges the splat"
 - 2026-11-05 21:01 (2 screenshots: tractor 4M, dark streaks on combine, black sky, blur at bottom) "How else we could improve viewer? I still see black lines behind. Maybe its a question for fiable? Can we use phones gpu?"
+- 2026-11-05 21:04 "Its worse" (after log-depth keys + cm² covariance build)

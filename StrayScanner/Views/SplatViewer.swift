@@ -82,13 +82,14 @@ final class SplatData {
         var buckets = [Int](repeating: 0, count: 4097)
         for i in 0..<count {
             let o = base.advanced(by: i * SplatLoader.stride)
-            let xx = Float(o.load(fromByteOffset: 12, as: Float16.self))
-            let yy = Float(o.load(fromByteOffset: 18, as: Float16.self))
-            let zz = Float(o.load(fromByteOffset: 22, as: Float16.self))
+            let m = o.load(fromByteOffset: 28, as: Float.self)
+            let xx = Float(o.load(fromByteOffset: 12, as: Float16.self)) * m
+            let yy = Float(o.load(fromByteOffset: 18, as: Float16.self)) * m
+            let zz = Float(o.load(fromByteOffset: 22, as: Float16.self)) * m
             let alpha = Float(o.load(fromByteOffset: 27, as: UInt8.self)) / 255
             let size = max(xx + yy + zz, 1e-10)                       // ~ squared extent
             let score = log2(alpha * size + 1e-12)                    // about -40 … +10
-            let k = UInt16(min(max((score + 30) * 60, 0), 4095))
+            let k = UInt16(min(max((score + 45) * 70, 0), 4095))
             keys[i] = 4095 - k                                        // descending
             buckets[Int(keys[i]) + 1] += 1
         }
@@ -196,9 +197,16 @@ enum SplatLoaderError: LocalizedError {
 
 enum SplatLoader {
     static let stride = 32
-    /// Covariances are stored on the GPU as half floats in cm² (×10⁴): in m² the small splats of a big scene fall
-    /// below half precision and lose their shape (thin dark streaks). The shader divides it back.
-    static let covScale: Float = 1e4
+    /// Covariance on the GPU: 6 half floats divided by the splat's own largest diagonal term, plus that term as a
+    /// float32 in the last 4 bytes. Halves alone either lose small splats (m²) or clip big ones (cm²); per-splat
+    /// normalising keeps both exact to ~0.1 %.
+    static func packCov(_ c: [Float], into o: UnsafeMutableRawPointer) {
+        let m = max(abs(c[0]), abs(c[3]), abs(c[5]), 1e-20)
+        for t in 0..<6 {
+            o.storeBytes(of: Float16(c[t] / m), toByteOffset: 12 + t * 2, as: Float16.self)
+        }
+        o.storeBytes(of: m, toByteOffset: 28, as: Float.self)
+    }
 
     /// SplatForge Studio /api/splat: u32 N, u32 pad×3 | f32 pos[N×3] | f16 cov[N×6] | u8 rgba[N×4].
     static func loadFromStudio(ply: String, maxSplats: Int, device: MTLDevice,
@@ -244,11 +252,11 @@ enum SplatLoader {
                 o.storeBytes(of: y, toByteOffset: 4, as: Float.self)
                 o.storeBytes(of: z, toByteOffset: 8, as: Float.self)
                 let c = base.advanced(by: 16 + posBytes + i * (covIs32 ? 24 : 12))
-                for t in 0..<6 {
-                    let v = covIs32 ? c.loadUnaligned(fromByteOffset: t * 4, as: Float.self)
-                                    : Float(c.loadUnaligned(fromByteOffset: t * 2, as: Float16.self))
-                    o.storeBytes(of: Float16(max(min(v * covScale, 65000), -65000)), toByteOffset: 12 + t * 2, as: Float16.self)
+                let cov = (0..<6).map { t in
+                    covIs32 ? c.loadUnaligned(fromByteOffset: t * 4, as: Float.self)
+                            : Float(c.loadUnaligned(fromByteOffset: t * 2, as: Float16.self))
                 }
+                packCov(cov, into: o)
                 o.advanced(by: 24).copyMemory(from: base.advanced(by: 16 + posBytes + covBytes + i * 4), byteCount: 4)
             }
         }
@@ -315,9 +323,7 @@ enum SplatLoader {
                 o.storeBytes(of: p.y, toByteOffset: 4, as: Float.self)
                 o.storeBytes(of: p.z, toByteOffset: 8, as: Float.self)
                 let terms = [cov[0, 0], cov[0, 1], cov[0, 2], cov[1, 1], cov[1, 2], cov[2, 2]]
-                for (t, value) in terms.enumerated() {
-                    o.storeBytes(of: Float16(max(min(value * SplatLoader.covScale, 65000), -65000)), toByteOffset: 12 + t * 2, as: Float16.self)
-                }
+                SplatLoader.packCov(terms, into: o)
                 for c in 0..<3 {
                     let v = min(max(0.5 + c0 * f(dc[c]), 0), 1)
                     o.storeBytes(of: UInt8(v * 255), toByteOffset: 24 + c, as: UInt8.self)
@@ -330,6 +336,14 @@ enum SplatLoader {
 }
 
 // MARK: - Renderer
+
+private struct GSSortUniforms {
+    var view: simd_float4x4
+    var tanX: Float
+    var tanY: Float
+    var count: UInt32
+    var pad: UInt32 = 0
+}
 
 private struct GSUniforms {
     var view: simd_float4x4
@@ -364,6 +378,10 @@ final class GaussianSplatRenderer {
     /// While the view moves, sort and draw only the most visible splats so the order keeps up with the camera
     /// (a stale order is what smears big scenes); the full set is sorted again once the view is still.
     var interactive = false
+    /// GPU sort (every frame, exact order at any splat count). Falls back to the CPU sort if the kernels are missing.
+    var commandQueue: MTLCommandQueue?
+    private var gpu: (keys: MTLComputePipelineState, scan: MTLComputePipelineState, scatter: MTLComputePipelineState,
+                      keyBuffer: MTLBuffer, hist: MTLBuffer, offsets: MTLBuffer, order: MTLBuffer, args: MTLBuffer)?
     static let interactiveBudget = 800_000
     private var lastSortedSubset = false
 
@@ -395,10 +413,36 @@ final class GaussianSplatRenderer {
         self.orderCounts = [splats.count, 0, 0]
         keys = [UInt16](repeating: 0, count: splats.count)
         depths = [Float](repeating: 0, count: splats.count)
+        if let k = library.makeFunction(name: "gsKeys").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+           let sc = library.makeFunction(name: "gsScan").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+           let sa = library.makeFunction(name: "gsScatter").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+           sc.maxTotalThreadsPerThreadgroup >= 256,
+           let kb = device.makeBuffer(length: splats.count * 4, options: .storageModePrivate),
+           let h = device.makeBuffer(length: 65536 * 4, options: .storageModePrivate),
+           let o = device.makeBuffer(length: 65536 * 4, options: .storageModePrivate),
+           let ob = device.makeBuffer(length: splats.count * 4, options: .storageModePrivate),
+           let a = device.makeBuffer(length: 16, options: .storageModePrivate) {
+            gpu = (k, sc, sa, kb, h, o, ob, a)
+        }
     }
 
     /// Encodes the splats into an existing render encoder (colour target with the renderer's pixel format).
     func draw(_ encoder: MTLRenderCommandEncoder, view: simd_float4x4, projection: simd_float4x4, viewport: CGSize) {
+        if let g = gpu, let queue = commandQueue, let cb = queue.makeCommandBuffer() {
+            // Sorted on the GPU in its own command buffer, committed now — so it runs before the caller's frame.
+            encodeGPUSort(cb, g, view: view, projection: projection)
+            cb.commit()
+            var uniforms = GSUniforms(view: view, projection: projection,
+                                      viewport: SIMD2<Float>(Float(viewport.width), Float(viewport.height)),
+                                      focal: SIMD2<Float>(projection.columns.0.x * Float(viewport.width) * 0.5,
+                                                          projection.columns.1.y * Float(viewport.height) * 0.5))
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(g.order, offset: 0, index: 1)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
+            encoder.drawPrimitives(type: .triangleStrip, indirectBuffer: g.args, indirectBufferOffset: 0)
+            return
+        }
         requestSort(view: view, projection: projection)
         lock.lock()
         let order = orderBuffers[currentOrder]
@@ -415,6 +459,37 @@ final class GaussianSplatRenderer {
         encoder.setVertexBuffer(order, offset: 0, index: 1)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+    }
+
+    private func encodeGPUSort(_ cb: MTLCommandBuffer, _ g: (keys: MTLComputePipelineState, scan: MTLComputePipelineState,
+                               scatter: MTLComputePipelineState, keyBuffer: MTLBuffer, hist: MTLBuffer, offsets: MTLBuffer,
+                               order: MTLBuffer, args: MTLBuffer), view: simd_float4x4, projection: simd_float4x4) {
+        guard let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.fill(buffer: g.hist, range: 0..<g.hist.length, value: 0)
+        blit.endEncoding()
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        let n = splats.count
+        var u = GSSortUniforms(view: view, tanX: 1.6 / max(projection.columns.0.x, 0.01),
+                               tanY: 1.6 / max(projection.columns.1.y, 0.01), count: UInt32(n))
+        enc.setComputePipelineState(g.keys)
+        enc.setBuffer(splats.buffer, offset: 0, index: 0)
+        enc.setBuffer(g.keyBuffer, offset: 0, index: 1)
+        enc.setBuffer(g.hist, offset: 0, index: 2)
+        enc.setBytes(&u, length: MemoryLayout<GSSortUniforms>.stride, index: 3)
+        enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.setComputePipelineState(g.scan)
+        enc.setBuffer(g.hist, offset: 0, index: 0)
+        enc.setBuffer(g.offsets, offset: 0, index: 1)
+        enc.setBuffer(g.args, offset: 0, index: 2)
+        enc.setThreadgroupMemoryLength(256 * 4, index: 0)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.setComputePipelineState(g.scatter)
+        enc.setBuffer(g.keyBuffer, offset: 0, index: 0)
+        enc.setBuffer(g.offsets, offset: 0, index: 1)
+        enc.setBuffer(g.order, offset: 0, index: 2)
+        enc.setBytes(&u, length: MemoryLayout<GSSortUniforms>.stride, index: 3)
+        enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     private func requestSort(view: simd_float4x4, projection: simd_float4x4) {
@@ -585,6 +660,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         preferredFramesPerSecond = 60
         commandQueue = device.makeCommandQueue()
         renderer = GaussianSplatRenderer(device: device, splats: splats, colorFormat: colorPixelFormat)
+        renderer?.commandQueue = commandQueue
         delegate = self
         // Draw only when something changed (a gesture or a finished sort): no work and no battery use while still.
         isPaused = true
@@ -715,6 +791,7 @@ final class ARSplatView: MTKView, MTKViewDelegate {
         preferredFramesPerSecond = 60
         commandQueue = device.makeCommandQueue()
         renderer = GaussianSplatRenderer(device: device, splats: splats, colorFormat: colorPixelFormat)
+        renderer?.commandQueue = commandQueue
         delegate = self
         var cache: CVMetalTextureCache?
         CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)

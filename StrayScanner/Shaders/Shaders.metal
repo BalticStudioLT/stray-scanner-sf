@@ -181,7 +181,7 @@ struct GSplat {
     packed_float3 position;
     half cov[6];        // xx, xy, xz, yy, yz, zz (world space)
     uchar4 color;       // rgb + opacity
-    uint pad;
+    float covScale;     // covariance = cov × covScale (cov normalised per splat)
 };
 
 struct GSUniforms {
@@ -214,7 +214,7 @@ vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float3x3 W = float3x3(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
     float3x3 S = float3x3(float3(s.cov[0], s.cov[1], s.cov[2]),
                           float3(s.cov[1], s.cov[3], s.cov[4]),
-                          float3(s.cov[2], s.cov[4], s.cov[5])) * 1e-4;   // stored in cm²
+                          float3(s.cov[2], s.cov[4], s.cov[5])) * s.covScale;
     float3x3 C = W * S * transpose(W);
     // Jacobian of the perspective projection (pixels per view-space unit), y up like NDC.
     float3 j0 = float3(u.focal.x / d, 0.0, u.focal.x * t.x / (d * d));
@@ -255,4 +255,75 @@ fragment half4 gsFragment(GSOut in [[stage_in]]) {
         discard_fragment();
     }
     return half4(in.color.rgb * alpha, alpha);   // premultiplied, drawn back to front
+}
+
+// MARK: - GPU depth sort for the splat viewer (counting sort on 16-bit log-depth keys, all on the GPU every frame)
+
+struct GSSortUniforms {
+    float4x4 view;
+    float tanX;         // half view width per metre of depth (with margin)
+    float tanY;
+    uint count;
+    uint pad;
+};
+
+constant float GS_LOG_NEAR = -5.643856;   // log2(0.02 m)
+constant float GS_LOG_FAR  = 10.965784;   // log2(2000 m)
+constant uint GS_CULLED = 0xFFFFFFFF;
+
+kernel void gsKeys(uint i [[thread_position_in_grid]],
+                   const device GSplat* splats [[ buffer(0) ]],
+                   device uint* keys [[ buffer(1) ]],
+                   device atomic_uint* hist [[ buffer(2) ]],
+                   constant GSSortUniforms& u [[ buffer(3) ]]) {
+    if (i >= u.count) return;
+    float4 t = u.view * float4(float3(splats[i].position), 1.0);
+    float d = -t.z;
+    uint key = GS_CULLED;
+    if (d >= 0.02 && abs(t.x) <= d * u.tanX + 0.5 && abs(t.y) <= d * u.tanY + 0.5) {
+        float f = saturate((log2(d) - GS_LOG_NEAR) / (GS_LOG_FAR - GS_LOG_NEAR));
+        key = 65535u - uint(f * 65535.0);           // far = small key = drawn first
+        atomic_fetch_add_explicit(&hist[key], 1u, memory_order_relaxed);
+    }
+    keys[i] = key;
+}
+
+// One threadgroup of 256 threads, 256 buckets each: exclusive prefix sum of the 65 536-bucket histogram,
+// plus the indirect draw arguments (4 vertices × visible splats).
+kernel void gsScan(uint tid [[thread_index_in_threadgroup]],
+                   const device uint* hist [[ buffer(0) ]],
+                   device uint* offsets [[ buffer(1) ]],
+                   device uint* args [[ buffer(2) ]],
+                   threadgroup uint* sums [[ threadgroup(0) ]]) {
+    uint base = tid * 256u;
+    uint s = 0;
+    for (uint j = 0; j < 256u; j++) s += hist[base + j];
+    sums[tid] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint off = 1; off < 256u; off <<= 1) {
+        uint v = tid >= off ? sums[tid - off] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        sums[tid] += v;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    uint run = sums[tid] - s;
+    for (uint j = 0; j < 256u; j++) {
+        offsets[base + j] = run;
+        run += hist[base + j];
+    }
+    if (tid == 255u) {
+        args[0] = 4u; args[1] = sums[255]; args[2] = 0u; args[3] = 0u;
+    }
+}
+
+kernel void gsScatter(uint i [[thread_position_in_grid]],
+                      const device uint* keys [[ buffer(0) ]],
+                      device atomic_uint* offsets [[ buffer(1) ]],
+                      device uint* order [[ buffer(2) ]],
+                      constant GSSortUniforms& u [[ buffer(3) ]]) {
+    if (i >= u.count) return;
+    uint k = keys[i];
+    if (k == GS_CULLED) return;
+    uint pos = atomic_fetch_add_explicit(&offsets[k], 1u, memory_order_relaxed);
+    order[pos] = i;
 }
