@@ -214,7 +214,7 @@ vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float3x3 W = float3x3(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
     float3x3 S = float3x3(float3(s.cov[0], s.cov[1], s.cov[2]),
                           float3(s.cov[1], s.cov[3], s.cov[4]),
-                          float3(s.cov[2], s.cov[4], s.cov[5]));
+                          float3(s.cov[2], s.cov[4], s.cov[5])) * 1e-4;   // stored in cm²
     float3x3 C = W * S * transpose(W);
     // Jacobian of the perspective projection (pixels per view-space unit), y up like NDC.
     float3 j0 = float3(u.focal.x / d, 0.0, u.focal.x * t.x / (d * d));

@@ -88,7 +88,7 @@ final class SplatData {
             let alpha = Float(o.load(fromByteOffset: 27, as: UInt8.self)) / 255
             let size = max(xx + yy + zz, 1e-10)                       // ~ squared extent
             let score = log2(alpha * size + 1e-12)                    // about -40 … +10
-            let k = UInt16(min(max((score + 40) * 80, 0), 4095))
+            let k = UInt16(min(max((score + 30) * 60, 0), 4095))
             keys[i] = 4095 - k                                        // descending
             buckets[Int(keys[i]) + 1] += 1
         }
@@ -196,12 +196,16 @@ enum SplatLoaderError: LocalizedError {
 
 enum SplatLoader {
     static let stride = 32
+    /// Covariances are stored on the GPU as half floats in cm² (×10⁴): in m² the small splats of a big scene fall
+    /// below half precision and lose their shape (thin dark streaks). The shader divides it back.
+    static let covScale: Float = 1e4
 
     /// SplatForge Studio /api/splat: u32 N, u32 pad×3 | f32 pos[N×3] | f16 cov[N×6] | u8 rgba[N×4].
     static func loadFromStudio(ply: String, maxSplats: Int, device: MTLDevice,
                                progress: @escaping (String) -> Void) async throws -> SplatData {
         let settings = PCLinkSettings.load()
-        guard let url = settings.url("/api/splat", query: ["ply": ply, "max": String(maxSplats)]) else {
+        // fmt=2 asks for float32 covariances (older Studios ignore it and send format 1).
+        guard let url = settings.url("/api/splat", query: ["ply": ply, "max": String(maxSplats), "fmt": "2"]) else {
             throw SplatLoaderError.bad("Set the PC address first")
         }
         var request = URLRequest(url: url, timeoutInterval: 300)
@@ -218,7 +222,9 @@ enum SplatLoader {
     static func decodeStudio(_ data: Data, device: MTLDevice) throws -> SplatData {
         guard data.count >= 16 else { throw SplatLoaderError.bad("Empty splat") }
         let n = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt32.self) })
-        let posBytes = n * 12, covBytes = n * 12
+        let version = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) })
+        let covIs32 = version >= 2
+        let posBytes = n * 12, covBytes = n * (covIs32 ? 24 : 12)
         guard n > 0, data.count >= 16 + posBytes + covBytes + n * 4 else { throw SplatLoaderError.bad("Splat data is cut off") }
         guard let buffer = device.makeBuffer(length: n * stride, options: .storageModeShared) else {
             throw SplatLoaderError.bad("Not enough GPU memory")
@@ -237,7 +243,12 @@ enum SplatLoader {
                 o.storeBytes(of: x, toByteOffset: 0, as: Float.self)
                 o.storeBytes(of: y, toByteOffset: 4, as: Float.self)
                 o.storeBytes(of: z, toByteOffset: 8, as: Float.self)
-                o.advanced(by: 12).copyMemory(from: base.advanced(by: 16 + posBytes + i * 12), byteCount: 12)
+                let c = base.advanced(by: 16 + posBytes + i * (covIs32 ? 24 : 12))
+                for t in 0..<6 {
+                    let v = covIs32 ? c.loadUnaligned(fromByteOffset: t * 4, as: Float.self)
+                                    : Float(c.loadUnaligned(fromByteOffset: t * 2, as: Float16.self))
+                    o.storeBytes(of: Float16(max(min(v * covScale, 65000), -65000)), toByteOffset: 12 + t * 2, as: Float16.self)
+                }
                 o.advanced(by: 24).copyMemory(from: base.advanced(by: 16 + posBytes + covBytes + i * 4), byteCount: 4)
             }
         }
@@ -305,7 +316,7 @@ enum SplatLoader {
                 o.storeBytes(of: p.z, toByteOffset: 8, as: Float.self)
                 let terms = [cov[0, 0], cov[0, 1], cov[0, 2], cov[1, 1], cov[1, 2], cov[2, 2]]
                 for (t, value) in terms.enumerated() {
-                    o.storeBytes(of: Float16(value), toByteOffset: 12 + t * 2, as: Float16.self)
+                    o.storeBytes(of: Float16(max(min(value * SplatLoader.covScale, 65000), -65000)), toByteOffset: 12 + t * 2, as: Float16.self)
                 }
                 for c in 0..<3 {
                     let v = min(max(0.5 + c0 * f(dc[c]), 0), 1)
@@ -463,8 +474,11 @@ final class GaussianSplatRenderer {
                         depths[i] = .nan
                         continue
                     }
-                    depths[i] = z
-                    lo = min(lo, z); hi = max(hi, z)
+                    // Log of the distance: 65 536 buckets spread evenly in *relative* depth, so near splats keep fine
+                    // ordering even when far floaters stretch the range (linear keys caused dark ordering streaks).
+                    let ld = -log2(d)                       // larger = nearer; sorted ascending = far first
+                    depths[i] = ld
+                    lo = min(lo, ld); hi = max(hi, ld)
                 }
                 los[c] = lo; his[c] = hi
             }
@@ -543,7 +557,22 @@ private let cameraQuad: [Float] = [
 
 // MARK: - Orbit view
 
+enum SplatBackground: String, CaseIterable {
+    case black, grey, sky
+    var title: String { ["black": "Black", "grey": "Grey", "sky": "Sky blue"][rawValue] ?? rawValue }
+    var clear: MTLClearColor {
+        switch self {
+        case .black: return MTLClearColor(red: 0.03, green: 0.03, blue: 0.04, alpha: 1)
+        case .grey: return MTLClearColor(red: 0.42, green: 0.43, blue: 0.45, alpha: 1)
+        case .sky: return MTLClearColor(red: 0.62, green: 0.76, blue: 0.92, alpha: 1)
+        }
+    }
+}
+
 final class OrbitSplatView: MTKView, MTKViewDelegate {
+    var background: SplatBackground = .black {
+        didSet { clearColor = background.clear; setNeedsDisplay() }
+    }
     private var renderer: GaussianSplatRenderer?
     private var commandQueue: MTLCommandQueue?
     private var yaw: Float = 0, pitch: Float = 0.35, distance: Float = 3
@@ -830,6 +859,7 @@ struct SplatViewerScreen: View {
     /// Quality = how many splats are loaded (the PC thins the file evenly). More looks sharper but uses more memory
     /// and the phone sorts them every frame, so very large counts get slower.
     @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
+    @AppStorage("SplatBackground") private var background = SplatBackground.black.rawValue
     private let qualities: [(String, Int)] = [("Draft · 0.3 M", 300_000), ("Normal · 1 M", 1_000_000),
                                               ("High · 2 M", 2_000_000), ("Very high · 3 M", 3_000_000),
                                               ("All splats", 50_000_000)]
@@ -841,6 +871,7 @@ struct SplatViewerScreen: View {
                 Color.black.ignoresSafeArea()
                 if let splats = splats {
                     SplatCanvas(splats: splats, arMode: arMode, orientation: orientation,
+                                background: SplatBackground(rawValue: background) ?? .black,
                                 modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
                                 status: $status)
                         .id(inPlace)
@@ -889,6 +920,13 @@ struct SplatViewerScreen: View {
                                 }
                                 Button { orientation = turn(.init(0, 0, 1), .pi / 2) * orientation } label: {
                                     Label("Tip sideways 90°", systemImage: "rotate.left")
+                                }
+                            }
+                            Section("Background (3D view)") {
+                                ForEach(SplatBackground.allCases, id: \.self) { b in
+                                    Button { background = b.rawValue } label: {
+                                        if background == b.rawValue { Label(b.title, systemImage: "checkmark") } else { Text(b.title) }
+                                    }
                                 }
                             }
                             Section("Quality (splats loaded)") {
@@ -952,6 +990,7 @@ struct SplatCanvas: UIViewRepresentable {
     let splats: SplatData
     let arMode: Bool
     let orientation: simd_float3x3
+    let background: SplatBackground
     let modelScale: Float
     let inPlaceMap: URL?
     @Binding var status: String
@@ -1002,6 +1041,7 @@ struct SplatCanvas: UIViewRepresentable {
                 splats.orientation = orientation
                 container.orbit?.resetCamera()
             }
+            if container.orbit?.background != background { container.orbit?.background = background }
         }
     }
 
