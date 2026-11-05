@@ -33,3 +33,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 22:42 (screenshot of recorder: black gap under preview, insets Depth/Depth/Map, "PC ✓ PC:") "We have a lot of unused soace. And viewer repeats same stuff."
 - 2026-11-05 22:53 "I still dont actually understand computer conection. Seems useless"
 - 2026-11-05 23:00 "I like 1-2 options." (live PC preview splat while scanning + clear PC tips/verdict)
+- 2026-11-05 23:32 (LT) "Mastei kazka apie FSR arba optical flow? Dar niekas nera dares sitam" (FSR/MetalFX upscaling, optical flow — "nobody has done this yet")
