@@ -58,23 +58,23 @@ final class SplatData {
         self.count = count
         self.buffer = buffer
         self.positions = positions
-        var sum = SIMD3<Float>(repeating: 0)
-        var ys: [Float] = []
-        var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude), hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        // Robust framing: trained splats always have a few floaters very far away, so use the median and the
+        // 5th–95th percentile per axis instead of the mean and the full bounding box.
+        var xs: [Float] = [], ys: [Float] = [], zs: [Float] = []
+        let stride = max(count / 60_000, 1)
         var i = 0
         while i < count {
             let p = positions[i]
-            sum += p
-            ys.append(p.y)
-            lo = simd_min(lo, p)
-            hi = simd_max(hi, p)
-            i += 37
+            if p.x.isFinite && p.y.isFinite && p.z.isFinite { xs.append(p.x); ys.append(p.y); zs.append(p.z) }
+            i += stride
         }
-        let n = Float(max(ys.count, 1))
-        center = sum / n
-        ys.sort()
-        floorY = ys.isEmpty ? center.y : ys[ys.count / 50]
-        radius = max(simd_length(hi - lo) * 0.35, 0.5)
+        xs.sort(); ys.sort(); zs.sort()
+        func pick(_ a: [Float], _ f: Float) -> Float { a.isEmpty ? 0 : a[min(Int(Float(a.count - 1) * f), a.count - 1)] }
+        center = SIMD3(pick(xs, 0.5), pick(ys, 0.5), pick(zs, 0.5))
+        let lo = SIMD3(pick(xs, 0.05), pick(ys, 0.05), pick(zs, 0.05))
+        let hi = SIMD3(pick(xs, 0.95), pick(ys, 0.95), pick(zs, 0.95))
+        floorY = pick(ys, 0.02)
+        radius = max(simd_length(hi - lo) * 0.5, 0.5)
     }
 }
 
@@ -402,7 +402,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         guard let splats = renderer?.splats else { return }
         let c = splats.center
         target = flipped ? SIMD3<Float>(c.x, -c.y, -c.z) : c
-        distance = splats.radius * 2.2
+        distance = splats.radius * 1.6
         yaw = 0
         pitch = 0.35
     }

@@ -21,3 +21,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 10:39 "And when playing video i would also be able to see all other views."
 - 2026-11-05 10:45 "why 0.5 camera didnt had flash? it should use same settings as scan used"
 - 2026-11-05 10:46 "and what help is doing computer? because it only says seen"
+- 2026-11-05 10:52 (screenshot of splat viewer, kitchen_v2 tiny in the middle) "Also splats loads somewhere very far away"
