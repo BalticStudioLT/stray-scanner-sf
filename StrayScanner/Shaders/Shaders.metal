@@ -236,28 +236,38 @@ vertex GSOut gsVertexBack(uint vid [[vertex_id]], uint iid [[instance_id]],
     return gsProject(vid, order[n - 1u - iid], splats, u, sh);
 }
 
-static GSOut gsProject(uint vid, uint index, const device GSplat* splats, constant GSUniforms& u, const device half* sh) {
-    GSOut o;
-    o.index = index;
-    o.sigma2D = 1.0;
-    o.sigmaProj = 0.0;
+/// Everything about one splat on screen, computed once (not per quad corner).
+struct GSProjected {
+    bool valid;
+    float4 clip;
+    float2 axis1;      // pixels, already × k
+    float2 axis2;
+    float k;           // extent in σ
+    half4 color;       // SH applied, near fade applied
+    float d;
+    float sigma2D, sigmaProj;
+};
+
+static GSProjected gsProjectSplat(uint index, const device GSplat* splats, constant GSUniforms& u, const device half* sh) {
+    GSProjected r;
+    r.valid = false;
+    r.sigma2D = 1.0; r.sigmaProj = 0.0;
     GSplat s = splats[index];
-    o.color = half4(s.color) / 255.0h;
+    r.color = half4(s.color) / 255.0h;
     if (u.hasSH != 0u) {
         // View-dependent colour (degree 1): rgb += C1·(−y·c1 + z·c2 − x·c3), dir from camera to splat.
         float3 dir = normalize(float3(s.position) - u.cameraPos.xyz);
         const device half* c = sh + index * 9u;
         float3 c1 = float3(c[0], c[1], c[2]), c2 = float3(c[3], c[4], c[5]), c3 = float3(c[6], c[7], c[8]);
         float3 add = 0.48860251 * (-dir.y * c1 + dir.z * c2 - dir.x * c3);
-        o.color.rgb = half3(saturate(float3(o.color.rgb) + add));
+        r.color.rgb = half3(saturate(float3(r.color.rgb) + add));
     }
-    o.local = float2(0);
     float4 t = u.view * float4(float3(s.position), 1.0);
     float d = -t.z;                               // distance in front of the camera
-    if (d < 0.02) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+    r.d = d;
+    if (d < 0.02) return r;
     float4 clip = u.projection * t;
-    if (abs(clip.x) > 1.3 * clip.w || abs(clip.y) > 1.3 * clip.w) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
-
+    if (abs(clip.x) > 1.3 * clip.w || abs(clip.y) > 1.3 * clip.w) return r;
     float3x3 W = float3x3(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
     float3x3 S = float3x3(float3(s.cov[0], s.cov[1], s.cov[2]),
                           float3(s.cov[1], s.cov[3], s.cov[4]),
@@ -276,25 +286,70 @@ static GSOut gsProject(uint vid, uint index, const device GSplat* splats, consta
     float2 v1 = abs(b) > 1e-7 ? normalize(float2(b, l1 - a)) : (a >= c ? float2(1, 0) : float2(0, 1));
     float2 v2 = float2(-v1.y, v1.x);
     // Draw only as far out as the splat stays visible: alpha·exp(-k²/2) = 1/255 → k = sqrt(2·ln(255·alpha)).
-    // Faint splats get much smaller quads than a fixed 3σ — far less overdraw, the main cost on phones.
     float alpha0 = float(s.color.a) / 255.0;
-    if (alpha0 < 1.5 / 255.0) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+    if (alpha0 < 1.5 / 255.0) return r;
     float k = min(sqrt(2.0 * log(255.0 * alpha0)), 3.0);
     float r1 = k * sqrt(l1);
     float r2 = k * sqrt(l2);
     // Splats right in front of the lens blow up into screen-sized smears: skip anything wider than ~the screen,
     // and fade splats closer than 15 cm.
-    if (r1 > 0.8 * max(u.viewport.x, u.viewport.y) || r1 < 0.3) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
-    if (d < 0.15) { o.color.a *= half(saturate((d - 0.02) / 0.13)); }
+    if (r1 > 0.8 * max(u.viewport.x, u.viewport.y) || r1 < 0.3) return r;
+    if (d < 0.15) { r.color.a *= half(saturate((d - 0.02) / 0.13)); }
+    r.valid = true;
+    r.clip = clip;
+    r.axis1 = v1 * r1;
+    r.axis2 = v2 * r2;
+    r.k = k;
+    r.sigma2D = sqrt(l1);
+    r.sigmaProj = sqrt(max(l1 - 0.3, 0.0));
+    return r;
+}
 
+static GSOut gsProject(uint vid, uint index, const device GSplat* splats, constant GSUniforms& u, const device half* sh) {
+    GSOut o;
+    o.index = index;
+    GSProjected p = gsProjectSplat(index, splats, u, sh);
+    o.color = p.color;
+    o.local = float2(0);
+    o.viewDepth = p.d;
+    o.sigma2D = p.sigma2D;
+    o.sigmaProj = p.sigmaProj;
+    if (!p.valid) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
     float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
-    float2 offsetPx = corner.x * v1 * r1 + corner.y * v2 * r2;
+    float2 offsetPx = corner.x * p.axis1 + corner.y * p.axis2;
     float2 ndc = offsetPx / (u.viewport * 0.5);
-    o.position = clip + float4(ndc * clip.w, 0.0, 0.0);
-    o.local = corner * k;
-    o.viewDepth = d;
-    o.sigma2D = sqrt(l1);
-    o.sigmaProj = sqrt(max(l1 - 0.3, 0.0));
+    o.position = p.clip + float4(ndc * p.clip.w, 0.0, 0.0);
+    o.local = corner * p.k;
+    return o;
+}
+
+/// Compact per-splat screen data written by the sort pass, so the 4 quad corners don't redo the projection.
+struct GSPre {
+    packed_float3 clipXYW;    // clip x, y, w (z is unused: no depth test)
+    half4 axes;               // axis1.xy, axis2.xy in pixels
+    uchar4 color;             // after SH and near fade
+    half k;
+    half pad0;
+    uint pad1;
+};
+
+vertex GSOut gsVertexPre(uint vid [[vertex_id]], uint iid [[instance_id]],
+                         const device GSPre* pre [[ buffer(0) ]],
+                         const device uint* order [[ buffer(1) ]],
+                         constant GSUniforms& u [[ buffer(2) ]]) {
+    uint index = order[iid];
+    GSPre p = pre[index];
+    GSOut o;
+    o.index = index;
+    o.color = half4(p.color) / 255.0h;
+    o.viewDepth = p.clipXYW[2];
+    o.sigma2D = 1.0; o.sigmaProj = 0.0;
+    float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
+    float2 offsetPx = corner.x * float2(p.axes.xy) + corner.y * float2(p.axes.zw);
+    float2 ndc = offsetPx / (u.viewport * 0.5);
+    float w = p.clipXYW[2];
+    o.position = float4(p.clipXYW[0] + ndc.x * w, p.clipXYW[1] + ndc.y * w, 0.5 * w, w);
+    o.local = corner * float(p.k);
     return o;
 }
 
@@ -342,7 +397,10 @@ kernel void gsKeys(uint i [[thread_position_in_grid]],
                    const device GSplat* splats [[ buffer(0) ]],
                    device uint* keys [[ buffer(1) ]],
                    device atomic_uint* hist [[ buffer(2) ]],
-                   constant GSSortUniforms& u [[ buffer(3) ]]) {
+                   constant GSSortUniforms& u [[ buffer(3) ]],
+                   constant GSUniforms& g [[ buffer(4) ]],
+                   const device half* sh [[ buffer(5) ]],
+                   device GSPre* pre [[ buffer(6) ]]) {
     if (i >= u.count) return;
     float4 t = u.view * float4(float3(splats[i].position), 1.0);
     float d = -t.z;
@@ -355,9 +413,19 @@ kernel void gsKeys(uint i [[thread_position_in_grid]],
         if (sigma2 * u.lodFactor * u.lodFactor < d * d) visible = false;
     }
     if (visible) {
-        float f = saturate((log2(d) - GS_LOG_NEAR) / (GS_LOG_FAR - GS_LOG_NEAR));
-        key = 65535u - uint(f * 65535.0);           // far = small key = drawn first
-        atomic_fetch_add_explicit(&hist[key], 1u, memory_order_relaxed);
+        // Project once here (the vertex shader then only places 4 corners) and drop splats that won't draw.
+        GSProjected p = gsProjectSplat(i, splats, g, sh);
+        if (p.valid) {
+            GSPre q;
+            q.clipXYW = packed_float3(p.clip.x, p.clip.y, p.clip.w);
+            q.axes = half4(half2(p.axis1), half2(p.axis2));
+            q.color = uchar4(saturate(float4(p.color)) * 255.0 + 0.5);
+            q.k = half(p.k);
+            pre[i] = q;
+            float f = saturate((log2(d) - GS_LOG_NEAR) / (GS_LOG_FAR - GS_LOG_NEAR));
+            key = 65535u - uint(f * 65535.0);           // far = small key = drawn first
+            atomic_fetch_add_explicit(&hist[key], 1u, memory_order_relaxed);
+        }
     }
     keys[i] = key;
 }

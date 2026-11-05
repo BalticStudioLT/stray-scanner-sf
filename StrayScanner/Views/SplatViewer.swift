@@ -453,6 +453,12 @@ final class GaussianSplatRenderer {
         depthAttachment.sourceAlphaBlendFactor = .one
         depthAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         self.depthOutPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+        descriptor.vertexFunction = library.makeFunction(name: "gsVertexPre")
+        self.preDepthPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+        descriptor.fragmentFunction = library.makeFunction(name: "gsFragment")
+        descriptor.colorAttachments[1].pixelFormat = .invalid
+        self.prePipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+        self.preBuffer = device.makeBuffer(length: max(splats.count, 1) * 32, options: .storageModePrivate)
         // Sort-free pipeline (Fastest while moving).
         let oit = MTLRenderPipelineDescriptor()
         oit.vertexFunction = library.makeFunction(name: "gsVertex")
@@ -521,6 +527,11 @@ final class GaussianSplatRenderer {
     /// GPU-sorted order and its indirect draw arguments (front splat last) — used by on-phone training.
     var sortedOrder: (order: MTLBuffer, args: MTLBuffer)? { gpu.map { ($0.order, $0.args) } }
 
+    /// Per-splat screen data from the sort pass (32 B each) + the light vertex shader that reads it.
+    private var preBuffer: MTLBuffer?
+    private var prePipeline: MTLRenderPipelineState?
+    private var preDepthPipeline: MTLRenderPipelineState?
+
     var supportsSortFree: Bool { oitPipeline != nil && oitResolvePipeline != nil && identityOrder != nil }
 
     /// Sort-free draw into `target` (cleared to `clear`): no depth sort, two passes. Used while moving in Fastest.
@@ -582,19 +593,26 @@ final class GaussianSplatRenderer {
     func draw(_ encoder: MTLRenderCommandEncoder, view: simd_float4x4, projection: simd_float4x4, viewport: CGSize) {
         lastViewport = viewport
         if let g = gpu, let queue = commandQueue, let cb = queue.makeCommandBuffer() {
-            // Sorted on the GPU in its own command buffer, committed now — so it runs before the caller's frame.
-            encodeGPUSort(cb, g, view: view, projection: projection)
-            cb.commit()
             var uniforms = GSUniforms(view: view, projection: projection,
                                       viewport: SIMD2<Float>(Float(viewport.width), Float(viewport.height)),
                                       focal: SIMD2<Float>(projection.columns.0.x * Float(viewport.width) * 0.5,
                                                           projection.columns.1.y * Float(viewport.height) * 0.5))
-            encoder.setRenderPipelineState(activePipeline)
-            encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
-            encoder.setVertexBuffer(g.order, offset: 0, index: 1)
             let eye = view.inverse.columns.3
             uniforms.cameraPos = SIMD4<Float>(eye.x / eye.w, eye.y / eye.w, eye.z / eye.w, 1)
             uniforms.hasSH = splats.sh != nil ? 1 : 0
+            // Sorted (and projected once per splat) on the GPU in its own command buffer, committed now —
+            // so it runs before the caller's frame.
+            encodeGPUSort(cb, g, view: view, projection: projection, uniforms: &uniforms)
+            cb.commit()
+            let usePre = preBuffer != nil && (writesDepth ? preDepthPipeline : prePipeline) != nil
+            if usePre, let pre = preBuffer, let pipe = writesDepth ? preDepthPipeline : prePipeline {
+                encoder.setRenderPipelineState(pipe)
+                encoder.setVertexBuffer(pre, offset: 0, index: 0)
+            } else {
+                encoder.setRenderPipelineState(activePipeline)
+                encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
+            }
+            encoder.setVertexBuffer(g.order, offset: 0, index: 1)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
             encoder.setVertexBuffer(splats.sh ?? splats.buffer, offset: 0, index: 3)
             encoder.drawPrimitives(type: .triangleStrip, indirectBuffer: g.args, indirectBufferOffset: 0)
@@ -624,7 +642,8 @@ final class GaussianSplatRenderer {
 
     private func encodeGPUSort(_ cb: MTLCommandBuffer, _ g: (keys: MTLComputePipelineState, scan: MTLComputePipelineState,
                                scatter: MTLComputePipelineState, keyBuffer: MTLBuffer, hist: MTLBuffer, offsets: MTLBuffer,
-                               order: MTLBuffer, args: MTLBuffer), view: simd_float4x4, projection: simd_float4x4) {
+                               order: MTLBuffer, args: MTLBuffer), view: simd_float4x4, projection: simd_float4x4,
+                               uniforms: inout GSUniforms) {
         guard let blit = cb.makeBlitCommandEncoder() else { return }
         blit.fill(buffer: g.hist, range: 0..<g.hist.length, value: 0)
         blit.endEncoding()
@@ -640,6 +659,9 @@ final class GaussianSplatRenderer {
         enc.setBuffer(g.keyBuffer, offset: 0, index: 1)
         enc.setBuffer(g.hist, offset: 0, index: 2)
         enc.setBytes(&u, length: MemoryLayout<GSSortUniforms>.stride, index: 3)
+        enc.setBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 4)
+        enc.setBuffer(splats.sh ?? splats.buffer, offset: 0, index: 5)
+        enc.setBuffer(preBuffer ?? splats.buffer, offset: 0, index: 6)
         enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         enc.setComputePipelineState(g.scan)
         enc.setBuffer(g.hist, offset: 0, index: 0)
@@ -952,7 +974,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
             lowPass.colorAttachments[0].loadAction = .clear
             lowPass.colorAttachments[0].storeAction = .store
             lowPass.colorAttachments[0].clearColor = clearColor
-            if speed == .fast, renderer.supportsSortFree {
+            if false, speed == .fast, renderer.supportsSortFree {   // sort-free looked bad on real scenes (owner 00:27)
                 renderer.drawSortFree(commandBuffer, target: low, clear: clearColor, view: viewMatrix, projection: projection)
             } else if let lowEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: lowPass) {
                 renderer.draw(lowEncoder, view: viewMatrix, projection: projection,
