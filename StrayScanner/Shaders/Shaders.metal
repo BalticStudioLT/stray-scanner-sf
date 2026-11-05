@@ -210,15 +210,37 @@ struct GSOut {
     float2 local;       // position inside the splat in standard deviations
     half4 color;
     float viewDepth;    // metres in front of the camera (for AR occlusion)
+    uint index [[flat]];         // splat index (training)
+    float sigma2D [[flat]];      // on-screen σ in pixels incl. the 0.3 px² low-pass (training, isotropic splats)
+    float sigmaProj [[flat]];    // on-screen σ in pixels without the low-pass
 };
+
+static GSOut gsProject(uint vid, uint index, const device GSplat* splats, constant GSUniforms& u, const device half* sh);
 
 vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                       const device GSplat* splats [[ buffer(0) ]],
                       const device uint* order [[ buffer(1) ]],
                       constant GSUniforms& u [[ buffer(2) ]],
                       const device half* sh [[ buffer(3) ]]) {
+    return gsProject(vid, order[iid], splats, u, sh);
+}
+
+/// Same splats front-to-back (reverse of the sorted order) — for the training backward pass.
+vertex GSOut gsVertexBack(uint vid [[vertex_id]], uint iid [[instance_id]],
+                          const device GSplat* splats [[ buffer(0) ]],
+                          const device uint* order [[ buffer(1) ]],
+                          constant GSUniforms& u [[ buffer(2) ]],
+                          const device half* sh [[ buffer(3) ]],
+                          const device uint* args [[ buffer(4) ]]) {
+    uint n = args[1];
+    return gsProject(vid, order[n - 1u - iid], splats, u, sh);
+}
+
+static GSOut gsProject(uint vid, uint index, const device GSplat* splats, constant GSUniforms& u, const device half* sh) {
     GSOut o;
-    uint index = order[iid];
+    o.index = index;
+    o.sigma2D = 1.0;
+    o.sigmaProj = 0.0;
     GSplat s = splats[index];
     o.color = half4(s.color) / 255.0h;
     if (u.hasSH != 0u) {
@@ -271,6 +293,8 @@ vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     o.position = clip + float4(ndc * clip.w, 0.0, 0.0);
     o.local = corner * k;
     o.viewDepth = d;
+    o.sigma2D = sqrt(l1);
+    o.sigmaProj = sqrt(max(l1 - 0.3, 0.0));
     return o;
 }
 
@@ -586,4 +610,112 @@ fragment half4 oitResolve(CompositeOut in [[stage_in]],
     if (coverage < 0.002h) discard_fragment();
     half3 color = a.rgb / max(a.a, 1e-4h);
     return half4(color * coverage, coverage);   // premultiplied over the background
+}
+
+
+// MARK: - On-phone training (LiDAR-anchored, isotropic splats; positions fixed, colour/opacity/size learnt)
+// Forward: the normal viewer pipeline into a float target. Backward: draw the same splats front-to-back with
+// programmable blending (reads the running transmittance T and colour-in-front from the tile), which gives every
+// fragment exactly what it needs for the analytic gradients of an L1 loss; they are summed with float atomics.
+
+struct TrainParams {   // per splat
+    float3 rgb;        // 0…1
+    float opacityLogit;
+    float logScale;    // σ in metres = exp(logScale)
+    float3 position;
+};
+
+struct BackOut {
+    float T [[color(0)]];
+    float4 front [[color(1)]];
+};
+
+struct TrainUniforms {
+    float gradScale;
+};
+
+fragment BackOut gsBackward(GSOut in [[stage_in]],
+                            float Tin [[color(0)]],
+                            float4 frontIn [[color(1)]],
+                            texture2d<float, access::read> rendered [[ texture(0) ]],
+                            texture2d<float, access::read> target [[ texture(1) ]],
+                            device atomic_float* grads [[ buffer(0) ]],
+                            constant TrainUniforms& tu [[ buffer(1) ]]) {
+    float r2 = dot(in.local, in.local);
+    float o = float(in.color.a);
+    float alpha = min(o * exp(-0.5 * r2), 0.99);
+    BackOut out;
+    out.T = Tin;
+    out.front = frontIn;
+    if (alpha < 1.0 / 255.0 || Tin < 1e-4) return out;
+    uint2 p = uint2(in.position.xy);
+    float3 finalC = rendered.read(p).rgb;
+    float3 I = target.read(p).rgb;
+    float3 g = sign(finalC - I) * tu.gradScale;               // dL/dC for L1
+    float3 c = float3(in.color.rgb);
+    float T = Tin;
+    float3 behind = (finalC - frontIn.rgb - T * alpha * c) / max(T * (1.0 - alpha), 1e-4);
+    float3 dc = T * alpha * g;
+    float dAlpha = T * dot(c - behind, g);
+    float dQ = dAlpha * alpha * (1.0 - o);                    // through o = sigmoid(q), α = o·G
+    float s2 = in.sigma2D * in.sigma2D;
+    float dL = dAlpha * alpha * r2 * (in.sigmaProj * in.sigmaProj) / max(s2, 1e-6);   // through σ = e^l
+    device atomic_float* gp = grads + in.index * 5u;
+    atomic_fetch_add_explicit(gp + 0, dc.x, memory_order_relaxed);
+    atomic_fetch_add_explicit(gp + 1, dc.y, memory_order_relaxed);
+    atomic_fetch_add_explicit(gp + 2, dc.z, memory_order_relaxed);
+    atomic_fetch_add_explicit(gp + 3, dQ, memory_order_relaxed);
+    atomic_fetch_add_explicit(gp + 4, dL, memory_order_relaxed);
+    out.T = T * (1.0 - alpha);
+    out.front = float4(frontIn.rgb + T * alpha * c, 1.0);
+    return out;
+}
+
+struct AdamUniforms {
+    float lrColor, lrOpacity, lrScale;
+    float beta1, beta2, eps;
+    float bias1, bias2;        // 1 − β^t
+    uint count;
+};
+
+kernel void trainAdam(uint i [[thread_position_in_grid]],
+                      device TrainParams* params [[ buffer(0) ]],
+                      device float* grads [[ buffer(1) ]],
+                      device float* m [[ buffer(2) ]],
+                      device float* v [[ buffer(3) ]],
+                      constant AdamUniforms& a [[ buffer(4) ]]) {
+    if (i >= a.count) return;
+    float lr[5] = { a.lrColor, a.lrColor, a.lrColor, a.lrOpacity, a.lrScale };
+    float step[5];
+    for (uint k = 0; k < 5; k++) {
+        uint j = i * 5u + k;
+        float gk = grads[j];
+        grads[j] = 0.0;
+        m[j] = a.beta1 * m[j] + (1.0 - a.beta1) * gk;
+        v[j] = a.beta2 * v[j] + (1.0 - a.beta2) * gk * gk;
+        float mh = m[j] / a.bias1, vh = v[j] / a.bias2;
+        step[k] = lr[k] * mh / (sqrt(vh) + a.eps);
+    }
+    TrainParams p = params[i];
+    p.rgb = saturate(p.rgb - float3(step[0], step[1], step[2]));
+    p.opacityLogit = clamp(p.opacityLogit - step[3], -9.0, 9.0);
+    p.logScale = clamp(p.logScale - step[4], -9.0, -0.5);
+    params[i] = p;
+}
+
+/// Writes the render buffer (viewer format) from the trainable parameters.
+kernel void trainBuild(uint i [[thread_position_in_grid]],
+                       const device TrainParams* params [[ buffer(0) ]],
+                       device GSplat* splats [[ buffer(1) ]],
+                       constant uint& count [[ buffer(2) ]]) {
+    if (i >= count) return;
+    TrainParams p = params[i];
+    GSplat s;
+    s.position = packed_float3(p.position);
+    float sigma = exp(p.logScale);
+    s.cov[0] = 1.0h; s.cov[1] = 0.0h; s.cov[2] = 0.0h; s.cov[3] = 1.0h; s.cov[4] = 0.0h; s.cov[5] = 1.0h;
+    s.covScale = sigma * sigma;
+    float o = 1.0 / (1.0 + exp(-p.opacityLogit));
+    s.color = uchar4(uchar3(saturate(p.rgb) * 255.0 + 0.5), uchar(saturate(o) * 255.0 + 0.5));
+    splats[i] = s;
 }

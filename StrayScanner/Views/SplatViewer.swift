@@ -385,7 +385,7 @@ private struct GSSortUniforms {
     var lodFactor: Float = 0
 }
 
-private struct GSUniforms {
+struct GSUniforms {
     var view: simd_float4x4
     var projection: simd_float4x4
     var viewport: SIMD2<Float>
@@ -518,6 +518,9 @@ final class GaussianSplatRenderer {
     private var identityOrder: MTLBuffer?
     private var oitAccum: MTLTexture?
     private var oitReveal: MTLTexture?
+    /// GPU-sorted order and its indirect draw arguments (front splat last) — used by on-phone training.
+    var sortedOrder: (order: MTLBuffer, args: MTLBuffer)? { gpu.map { ($0.order, $0.args) } }
+
     var supportsSortFree: Bool { oitPipeline != nil && oitResolvePipeline != nil && identityOrder != nil }
 
     /// Sort-free draw into `target` (cleared to `clear`): no depth sort, two passes. Used while moving in Fastest.

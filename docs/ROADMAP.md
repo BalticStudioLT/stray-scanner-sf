@@ -24,7 +24,7 @@ Status: ☐ not started · ◐ in progress · ☑ done
 | 13 | Automatic guided-tour route from path + pins | PC | ☐ |
 | 14 | Enhancement during training (Difix3D+ idea), per-job switch | PC (Fable) | ☐ |
 | 15 | Sort-free "fast" viewer mode (Mobile-GS idea) | phone (weighted blended OIT while moving in Fastest ☑) | ☑ (needs owner test) |
-| 16 | Splat training on the phone, no PC (PocketGS idea) | phone | ☐ |
+| 16 | Splat training on the phone, no PC (PocketGS idea) | phone (v1 ☑: LiDAR-anchored isotropic splats, colour/opacity/size learnt on the GPU, phone_splat.ply; v2: learn positions + anisotropy, SSIM) | ◐ (needs owner test) |
 
 ## Tests
 

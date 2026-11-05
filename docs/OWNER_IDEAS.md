@@ -46,3 +46,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 23:56 (LT) "Tesk darba"
 - 2026-11-05 23:59 "Dont push so often updates. Just finish app" → compile-only on the Mac, one install at the end
 - 2026-11-06 00:04 (LT) "Tesk telefono darbus"
+- 2026-11-06 00:16 (LT) "Pabandom ta splatu mokyma telefone. Parasyk" → on-phone training (roadmap 16)
+- 2026-11-06 00:18 "Do all. I trust you"

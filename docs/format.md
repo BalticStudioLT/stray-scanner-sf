@@ -190,3 +190,10 @@ How: people come from Vision person segmentation; other moving things from optic
 between two checked frames compared with the flow the camera's own motion would cause over the LiDAR depth — pixels
 that move differently (> 3 px or > 35 %) are moving. Runs in the background and skips frames when busy, so it never
 slows recording. Frame numbers are the same as in `odometry.csv` / `depth/`.
+
+## phone_splat.ply (on-phone training, stray-scanner-sf fork)
+
+"Train here" on a LiDAR scan writes `phone_splat.ply` into the scan folder: a standard 3D Gaussian Splatting PLY
+(x y z, nx ny nz, f_dc_0..2, opacity, scale_0..2, rot_0..3; no f_rest) in the scan's ARKit world coordinates (y up,
+metres) — the same frame as `odometry.csv`. v1 is a quick preview: splats sit on 1.5 cm LiDAR voxels (positions fixed),
+isotropic; colour, opacity and size are learnt from ~120 sharp frames (480 px wide, L1, Adam, ~3000 steps).

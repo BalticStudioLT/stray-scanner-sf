@@ -142,6 +142,12 @@ struct SessionDetailView: View {
                             .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .glassButton()
+                    NavigationLink(destination: PhoneTrainView(folder: folder)) {
+                        Label("Train here", systemImage: "cpu")
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .glassButton()
                     NavigationLink(destination: UltraWideSessionView(parentScan: folder)) {
                         Label("Add 0.5×", systemImage: "camera.aperture")
                             .lineLimit(1)
