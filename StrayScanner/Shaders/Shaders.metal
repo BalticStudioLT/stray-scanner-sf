@@ -324,14 +324,13 @@ static GSOut gsProject(uint vid, uint index, const device GSplat* splats, consta
 }
 
 /// Compact per-splat screen data written by the sort pass, so the 4 quad corners don't redo the projection.
-struct GSPre {
-    packed_float3 clipXYW;    // clip x, y, w (z is unused: no depth test)
-    half4 axes;               // axis1.xy, axis2.xy in pixels
-    uchar4 color;             // after SH and near fade
-    half k;
-    half pad0;
-    uint pad1;
+struct GSPre {                // exactly 28 bytes, 4-byte aligned (the buffer has 32 per splat)
+    float clipX, clipY, clipW;  // clip x, y, w (z is unused: no depth test)
+    uint color;                 // uchar4 after SH and near fade
+    half ax, ay, bx, by;        // the two screen axes in pixels
+    half k, pad;
 };
+static_assert(sizeof(GSPre) <= 32, "GSPre must fit the 32-byte slots");
 
 vertex GSOut gsVertexPre(uint vid [[vertex_id]], uint iid [[instance_id]],
                          const device GSPre* pre [[ buffer(0) ]],
@@ -341,14 +340,14 @@ vertex GSOut gsVertexPre(uint vid [[vertex_id]], uint iid [[instance_id]],
     GSPre p = pre[index];
     GSOut o;
     o.index = index;
-    o.color = half4(p.color) / 255.0h;
-    o.viewDepth = p.clipXYW[2];
+    o.color = half4(as_type<uchar4>(p.color)) / 255.0h;
+    o.viewDepth = p.clipW;
     o.sigma2D = 1.0; o.sigmaProj = 0.0;
     float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
-    float2 offsetPx = corner.x * float2(p.axes.xy) + corner.y * float2(p.axes.zw);
+    float2 offsetPx = corner.x * float2(p.ax, p.ay) + corner.y * float2(p.bx, p.by);
     float2 ndc = offsetPx / (u.viewport * 0.5);
-    float w = p.clipXYW[2];
-    o.position = float4(p.clipXYW[0] + ndc.x * w, p.clipXYW[1] + ndc.y * w, 0.5 * w, w);
+    float w = p.clipW;
+    o.position = float4(p.clipX + ndc.x * w, p.clipY + ndc.y * w, 0.5 * w, w);
     o.local = corner * float(p.k);
     return o;
 }
@@ -417,10 +416,11 @@ kernel void gsKeys(uint i [[thread_position_in_grid]],
         GSProjected p = gsProjectSplat(i, splats, g, sh);
         if (p.valid) {
             GSPre q;
-            q.clipXYW = packed_float3(p.clip.x, p.clip.y, p.clip.w);
-            q.axes = half4(half2(p.axis1), half2(p.axis2));
-            q.color = uchar4(saturate(float4(p.color)) * 255.0 + 0.5);
+            q.clipX = p.clip.x; q.clipY = p.clip.y; q.clipW = p.clip.w;
+            q.ax = half(p.axis1.x); q.ay = half(p.axis1.y); q.bx = half(p.axis2.x); q.by = half(p.axis2.y);
+            q.color = as_type<uint>(uchar4(saturate(float4(p.color)) * 255.0 + 0.5));
             q.k = half(p.k);
+            q.pad = 0.0h;
             pre[i] = q;
             float f = saturate((log2(d) - GS_LOG_NEAR) / (GS_LOG_FAR - GS_LOG_NEAR));
             key = 65535u - uint(f * 65535.0);           // far = small key = drawn first

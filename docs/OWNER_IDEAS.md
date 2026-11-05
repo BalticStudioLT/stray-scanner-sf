@@ -51,3 +51,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-06 00:27 (screenshot: Fastest/sort-free mode with black holes) "Fast mode looks bad. For training talk with splat forge, it knows now a lot of tricks. Also try to optimize it more"
 - 2026-11-06 00:28 "And give same information for splat forge, maybe it can it use in dekstop app"
 - 2026-11-06 00:32 "Maybe it has some amazing ways on saving memory and processing power to render faster and better" (ask SplatForge)
+- 2026-11-06 00:36 (screenshot: viewer shows only sky colour, no splats) "Now i see only sky"
