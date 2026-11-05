@@ -39,3 +39,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 23:44 (LT) "Jo man viskas patinka. O del pagrazinimo tai splat net dar tiek arti realaus vaizdo, todel pagrazinimas nepakentu" — all 6 extra tricks approved (variable rasterization, AR occlusion, sky/window/mirror masks, compression, frame reuse, auto tour route); owner OK with AI enhancement since splats are not yet photo-real
 - 2026-11-05 23:46 "Search more tricks" — research: RT-Splatting (glass), mirror methods, Structured-Li-GS, PocketGS (on-phone training), Mobile-GS, SOG/SPZ/streamed SOG
 - 2026-11-05 23:48 (LT) "Jo pridek viska prie plano ir testavimu" → docs/ROADMAP.md (16 items with tests)
+- 2026-11-05 23:50 (LT) "Gal tokios medziagos jau yra mano skenavimuose. Mac turetu but vel prieinamas"
