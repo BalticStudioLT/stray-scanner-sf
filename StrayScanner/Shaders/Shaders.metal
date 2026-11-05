@@ -189,6 +189,9 @@ struct GSUniforms {
     float4x4 projection;
     float2 viewport;    // pixels
     float2 focal;       // pixels
+    float4 cameraPos;   // camera position in the splat file's coordinates
+    uint hasSH;         // 1 = buffer(3) holds degree-1 SH (9 halves per splat)
+    uint pad0, pad1, pad2;
 };
 
 struct GSOut {
@@ -200,10 +203,20 @@ struct GSOut {
 vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                       const device GSplat* splats [[ buffer(0) ]],
                       const device uint* order [[ buffer(1) ]],
-                      constant GSUniforms& u [[ buffer(2) ]]) {
+                      constant GSUniforms& u [[ buffer(2) ]],
+                      const device half* sh [[ buffer(3) ]]) {
     GSOut o;
-    GSplat s = splats[order[iid]];
+    uint index = order[iid];
+    GSplat s = splats[index];
     o.color = half4(s.color) / 255.0h;
+    if (u.hasSH != 0u) {
+        // View-dependent colour (degree 1): rgb += C1·(−y·c1 + z·c2 − x·c3), dir from camera to splat.
+        float3 dir = normalize(float3(s.position) - u.cameraPos.xyz);
+        const device half* c = sh + index * 9u;
+        float3 c1 = float3(c[0], c[1], c[2]), c2 = float3(c[3], c[4], c[5]), c3 = float3(c[6], c[7], c[8]);
+        float3 add = 0.48860251 * (-dir.y * c1 + dir.z * c2 - dir.x * c3);
+        o.color.rgb = half3(saturate(float3(o.color.rgb) + add));
+    }
     o.local = float2(0);
     float4 t = u.view * float4(float3(s.position), 1.0);
     float d = -t.z;                               // distance in front of the camera

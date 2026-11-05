@@ -29,3 +29,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 21:04 "Its worse" (after log-depth keys + cm² covariance build)
 - 2026-11-05 21:09 "Much better. Can we port more of the app to gpu side?" (after full GPU splat sort)
 - 2026-11-05 21:11 "And could maybe splatforge optimize view before it has to be done by phone?"
+- 2026-11-05 22:27 "Other AI did its job. I want better UI"

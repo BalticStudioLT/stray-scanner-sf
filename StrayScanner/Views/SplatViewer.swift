@@ -50,6 +50,10 @@ final class SplatData {
     let count: Int
     let buffer: MTLBuffer
     let positions: [SIMD3<Float>]
+    /// Degree-1 spherical harmonics (view-dependent colour): 9 halves per splat, coefficient-major (c1 rgb, c2 rgb, c3 rgb).
+    var sh: MTLBuffer?
+    /// "Up" from SplatForge (world_up.json or the cameras' average up), in file coordinates.
+    var pcUp: SIMD3<Float>?
     /// Turns the file's coordinates upright (world = orientation × file). Set by auto-level or the Level menu.
     var orientation = matrix_identity_float3x3 { didSet { if orientation != oldValue { computeStats() } } }
     /// Framing in the upright frame (robust: median and 5–95th percentile, so far floaters don't count).
@@ -121,6 +125,12 @@ final class SplatData {
         let hi = SIMD3(P(xs, 0.95), P(ys, 0.95), P(zs, 0.95))
         floorY = P(ys, 0.02)
         radius = max(simd_length(hi - lo) * 0.5, 0.5)
+    }
+
+    /// Rotation that turns SplatForge's up vector to +Y, if the PC sent one.
+    func pcUpOrientation() -> simd_float3x3? {
+        guard let up = pcUp, simd_length(up) > 0.1 else { return nil }
+        return simd_float3x3(simd_quatf(from: simd_normalize(up), to: SIMD3<Float>(0, 1, 0)))
     }
 
     /// Finds "up": the ground (or floor) is the scene's flattest direction, so take the axis of least spread of the
@@ -213,7 +223,9 @@ enum SplatLoader {
                                progress: @escaping (String) -> Void) async throws -> SplatData {
         let settings = PCLinkSettings.load()
         // fmt=2 asks for float32 covariances (older Studios ignore it and send format 1).
-        guard let url = settings.url("/api/splat", query: ["ply": ply, "max": String(maxSplats), "fmt": "2"]) else {
+        // fmt=2: f32 covariances · sh=1: view-dependent colour · opt=1: PC prunes floaters and sorts best-first,
+        // so max=N is simply the best N splats. Older Studios ignore what they don't know.
+        guard let url = settings.url("/api/splat", query: ["ply": ply, "max": String(maxSplats), "fmt": "2", "sh": "1", "opt": "1"]) else {
             throw SplatLoaderError.bad("Set the PC address first")
         }
         var request = URLRequest(url: url, timeoutInterval: 300)
@@ -224,13 +236,24 @@ enum SplatLoader {
             throw SplatLoaderError.bad(http.statusCode == 403 ? "Wrong Studio token" : "PC answered \(http.statusCode)")
         }
         progress("Preparing \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))…")
-        return try decodeStudio(data, device: device)
+        let splats = try decodeStudio(data, device: device)
+        if let metaURL = settings.url("/api/splat/meta", query: ["ply": ply]) {
+            var meta = URLRequest(url: metaURL, timeoutInterval: 10)
+            meta.setValue(settings.token, forHTTPHeaderField: "X-Token")
+            if let (body, _) = try? await URLSession.shared.data(for: meta),
+               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+               let up = json["up"] as? [Double], up.count == 3 {
+                splats.pcUp = SIMD3<Float>(Float(up[0]), Float(up[1]), Float(up[2]))
+            }
+        }
+        return splats
     }
 
     static func decodeStudio(_ data: Data, device: MTLDevice) throws -> SplatData {
         guard data.count >= 16 else { throw SplatLoaderError.bad("Empty splat") }
         let n = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt32.self) })
         let version = Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) })
+        let hasSH = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) } == 1
         let covIs32 = version >= 2
         let posBytes = n * 12, covBytes = n * (covIs32 ? 24 : 12)
         guard n > 0, data.count >= 16 + posBytes + covBytes + n * 4 else { throw SplatLoaderError.bad("Splat data is cut off") }
@@ -260,7 +283,12 @@ enum SplatLoader {
                 o.advanced(by: 24).copyMemory(from: base.advanced(by: 16 + posBytes + covBytes + i * 4), byteCount: 4)
             }
         }
-        return SplatData(count: n, buffer: buffer, positions: positions)
+        let result = SplatData(count: n, buffer: buffer, positions: positions)
+        let shOffset = 16 + posBytes + covBytes + n * 4
+        if hasSH, data.count >= shOffset + n * 18 {
+            result.sh = data.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!.advanced(by: shOffset), length: n * 18, options: .storageModeShared) }
+        }
+        return result
     }
 
     /// Standard 3D Gaussian Splatting PLY (binary little endian, float properties:
@@ -294,6 +322,10 @@ enum SplatLoader {
         let iop = try index("opacity")
         let sc = [try index("scale_0"), try index("scale_1"), try index("scale_2")]
         let rot = [try index("rot_0"), try index("rot_1"), try index("rot_2"), try index("rot_3")]
+        // f_rest is channel-major (all R coefficients, then G, then B); degree 1 = the first 3 of each channel.
+        let restCount = properties.filter { $0.hasPrefix("f_rest_") }.count
+        let perChannel = restCount / 3
+        let rest: [Int]? = perChannel >= 3 ? (0..<3).flatMap { k in (0..<3).map { c in properties.firstIndex(of: "f_rest_\(c * perChannel + k)") ?? -1 } } : nil
         let rowBytes = properties.count * 4
         let start = headerEnd.upperBound
         guard count > 0, data.count >= start + count * rowBytes else { throw SplatLoaderError.bad("PLY is cut off") }
@@ -304,6 +336,8 @@ enum SplatLoader {
         }
         var positions = [SIMD3<Float>](repeating: .zero, count: n)
         let out = buffer.contents()
+        let shBuffer = rest.flatMap { r in r.contains(-1) ? nil : device.makeBuffer(length: n * 18, options: .storageModeShared) }
+        let shOut = shBuffer?.contents().bindMemory(to: Float16.self, capacity: n * 9)
         let c0: Float = 0.28209479177387814
         data.withUnsafeBytes { bytes in
             let base = bytes.baseAddress!.advanced(by: start)
@@ -329,9 +363,14 @@ enum SplatLoader {
                     o.storeBytes(of: UInt8(v * 255), toByteOffset: 24 + c, as: UInt8.self)
                 }
                 o.storeBytes(of: UInt8(min(max(opacity, 0), 1) * 255), toByteOffset: 27, as: UInt8.self)
+                if let shOut = shOut, let rest = rest {
+                    for j in 0..<9 { shOut[k * 9 + j] = Float16(f(rest[j])) }
+                }
             }
         }
-        return SplatData(count: n, buffer: buffer, positions: positions)
+        let result = SplatData(count: n, buffer: buffer, positions: positions)
+        result.sh = shBuffer
+        return result
     }
 }
 
@@ -350,6 +389,9 @@ private struct GSUniforms {
     var projection: simd_float4x4
     var viewport: SIMD2<Float>
     var focal: SIMD2<Float>
+    var cameraPos: SIMD4<Float> = .zero      // camera in the splat file's coordinates (for view-dependent colour)
+    var hasSH: UInt32 = 0
+    var pad0: UInt32 = 0, pad1: UInt32 = 0, pad2: UInt32 = 0
 }
 
 /// Draws splats back to front. Sorting runs on a background queue whenever the camera has moved;
@@ -439,7 +481,11 @@ final class GaussianSplatRenderer {
             encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
             encoder.setVertexBuffer(g.order, offset: 0, index: 1)
+            let eye = view.inverse.columns.3
+            uniforms.cameraPos = SIMD4<Float>(eye.x / eye.w, eye.y / eye.w, eye.z / eye.w, 1)
+            uniforms.hasSH = splats.sh != nil ? 1 : 0
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
+            encoder.setVertexBuffer(splats.sh ?? splats.buffer, offset: 0, index: 3)
             encoder.drawPrimitives(type: .triangleStrip, indirectBuffer: g.args, indirectBufferOffset: 0)
             return
         }
@@ -457,7 +503,11 @@ final class GaussianSplatRenderer {
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
         encoder.setVertexBuffer(order, offset: 0, index: 1)
-        encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
+        let eye = view.inverse.columns.3
+            uniforms.cameraPos = SIMD4<Float>(eye.x / eye.w, eye.y / eye.w, eye.z / eye.w, 1)
+            uniforms.hasSH = splats.sh != nil ? 1 : 0
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
+            encoder.setVertexBuffer(splats.sh ?? splats.buffer, offset: 0, index: 3)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
     }
 
@@ -929,111 +979,210 @@ struct SplatViewerScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var splats: SplatData?
     @State private var status = "Loading…"
+    @State private var hint: String?
     @State private var arMode = false
     @State private var orientation = matrix_identity_float3x3
     @State private var scaleIndex = 0
     @State private var inPlace = false
-    /// Quality = how many splats are loaded (the PC thins the file evenly). More looks sharper but uses more memory
-    /// and the phone sorts them every frame, so very large counts get slower.
+    @State private var resetToken = 0
+    @State private var failed = false
+    /// Quality = how many splats are loaded. SplatForge sends them best-first, so fewer = the most visible ones.
     @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
     @AppStorage("SplatBackground") private var background = SplatBackground.black.rawValue
-    private let qualities: [(String, Int)] = [("Draft · 0.3 M", 300_000), ("Normal · 1 M", 1_000_000),
-                                              ("High · 2 M", 2_000_000), ("Very high · 3 M", 3_000_000),
-                                              ("All splats", 50_000_000)]
+    private let qualities: [(String, String, Int)] = [("Draft", "0.3 M", 300_000), ("Normal", "1 M", 1_000_000),
+                                                      ("High", "2 M", 2_000_000), ("Very high", "3 M", 3_000_000),
+                                                      ("Everything", "All", 50_000_000)]
     private let scales: [(String, Float)] = [("1:1", 1), ("1:10", 0.1), ("1:50", 0.02)]
 
+    private var qualityLabel: String { qualities.first { $0.2 == maxSplats }?.1 ?? "1 M" }
+
     var body: some View {
-        NavigationStack {
-            ZStack(alignment: .bottom) {
-                Color.black.ignoresSafeArea()
-                if let splats = splats {
-                    SplatCanvas(splats: splats, arMode: arMode, orientation: orientation,
-                                background: SplatBackground(rawValue: background) ?? .black,
-                                modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
-                                status: $status)
-                        .id(inPlace)
-                        .ignoresSafeArea()
-                } else {
-                    ProgressView(status).tint(.white).foregroundStyle(.white)
-                }
-                VStack(spacing: 10) {
-                    Text(status)
-                        .font(.footnote.weight(.semibold))
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let splats = splats {
+                SplatCanvas(splats: splats, arMode: arMode, orientation: orientation,
+                            background: SplatBackground(rawValue: background) ?? .black,
+                            modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
+                            resetToken: resetToken, status: $status)
+                    .id(inPlace)
+                    .ignoresSafeArea()
+            } else {
+                loadingCard
+            }
+            VStack(spacing: 12) {
+                topBar
+                Spacer()
+                if let hint = hint {
+                    Text(hint)
+                        .font(.footnote.weight(.medium))
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .glassCard(cornerRadius: 16)
-                    HStack(spacing: 10) {
-                        Picker("View", selection: $arMode) {
-                            Text("3D").tag(false)
-                            Text("AR").tag(true)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 110)
-                        if arMode && source.worldMapURL != nil {
-                            Toggle(isOn: $inPlace) { Image(systemName: "location.fill") }
-                                .toggleStyle(.button)
-                                .accessibilityLabel("Show where it was scanned")
-                        }
-                        if arMode && !inPlace {
-                            Picker("Size", selection: $scaleIndex) {
-                                ForEach(0..<scales.count, id: \.self) { Text(scales[$0].0).tag($0) }
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 150)
-                        }
-                        Menu {
-                            Section("Which way is up") {
-                                Button { if let s = splats { orientation = s.autoLevelOrientation() } } label: {
-                                    Label("Auto level (ground down)", systemImage: "level")
-                                }
-                                Button { orientation = matrix_identity_float3x3 } label: {
-                                    Label("As exported", systemImage: "arrow.uturn.backward")
-                                }
-                                Button { orientation = turn(.init(1, 0, 0), .pi) * orientation } label: {
-                                    Label("Upside down", systemImage: "arrow.up.arrow.down")
-                                }
-                                Button { orientation = turn(.init(1, 0, 0), .pi / 2) * orientation } label: {
-                                    Label("Tip forward 90°", systemImage: "rotate.right")
-                                }
-                                Button { orientation = turn(.init(0, 0, 1), .pi / 2) * orientation } label: {
-                                    Label("Tip sideways 90°", systemImage: "rotate.left")
-                                }
-                            }
-                            Section("Background (3D view)") {
-                                ForEach(SplatBackground.allCases, id: \.self) { b in
-                                    Button { background = b.rawValue } label: {
-                                        if background == b.rawValue { Label(b.title, systemImage: "checkmark") } else { Text(b.title) }
-                                    }
-                                }
-                            }
-                            Section("Quality (splats loaded)") {
-                                ForEach(qualities, id: \.1) { q in
-                                    Button {
-                                        if maxSplats != q.1 { maxSplats = q.1; splats = nil; status = "Loading…" }
-                                    } label: {
-                                        if maxSplats == q.1 { Label(q.0, systemImage: "checkmark") } else { Text(q.0) }
-                                    }
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "slider.horizontal.3")
-                        }
-                        .glassButton()
-                        .accessibilityLabel("Orientation and quality")
-                    }
-                    .padding(10)
-                    .glassCard(cornerRadius: 24)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .glassCard(cornerRadius: 18)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(.bottom, 20)
+                if splats != nil { controlBar }
             }
-            .navigationTitle(source.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
-            }
-            .task(id: maxSplats) { await load() }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
         }
         .preferredColorScheme(.dark)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: hint)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: arMode)
+        .task(id: maxSplats) { await load() }
+        .onChange(of: status) { newValue in showHint(newValue) }
+    }
+
+    // MARK: Pieces
+
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            Button { dismiss() } label: {
+                Image(systemName: "xmark").font(.body.weight(.semibold)).frame(width: 22, height: 22)
+            }
+            .glassButton()
+            .accessibilityLabel("Close")
+            VStack(alignment: .leading, spacing: 1) {
+                Text(source.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 7)
+            .glassCard(cornerRadius: 18)
+            Spacer(minLength: 0)
+            if splats != nil && !arMode {
+                Button { resetToken += 1 } label: {
+                    Image(systemName: "scope").frame(width: 22, height: 22)
+                }
+                .glassButton()
+                .accessibilityLabel("Reset view")
+            }
+        }
+    }
+
+    private var subtitle: String {
+        guard let s = splats else { return failed ? "Not loaded" : "Loading…" }
+        var parts = [String(format: "%.2f M splats", Double(s.count) / 1e6)]
+        if s.sh != nil { parts.append("shiny colour") }
+        if s.pcUp != nil { parts.append("level from PC") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var loadingCard: some View {
+        VStack(spacing: 14) {
+            if failed {
+                Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
+            } else {
+                ProgressView().controlSize(.large).tint(.white)
+            }
+            Text(status).font(.callout).multilineTextAlignment(.center)
+            if failed {
+                Button("Try again") { failed = false; status = "Loading…"; Task { await load() } }
+                    .glassButton(prominent: true)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: 300)
+        .glassCard(cornerRadius: 28)
+    }
+
+    private var controlBar: some View {
+        HStack(spacing: 8) {
+            modeSwitch
+            Divider().frame(height: 24).opacity(0.4)
+            if arMode {
+                if source.worldMapURL != nil {
+                    Button { inPlace.toggle() } label: {
+                        Image(systemName: inPlace ? "location.fill" : "location").frame(width: 22, height: 22)
+                    }
+                    .glassButton(prominent: inPlace)
+                    .accessibilityLabel("Show where it was scanned")
+                }
+                if !inPlace {
+                    Menu {
+                        ForEach(0..<scales.count, id: \.self) { i in
+                            Button { scaleIndex = i } label: { check(scales[i].0, scaleIndex == i) }
+                        }
+                    } label: { chip(symbol: "arrow.up.left.and.arrow.down.right", text: scales[scaleIndex].0) }
+                }
+            }
+            Menu {
+                ForEach(qualities, id: \.2) { q in
+                    Button {
+                        if maxSplats != q.2 { maxSplats = q.2; splats = nil; status = "Loading \(q.0.lowercased())…" }
+                    } label: { check("\(q.0) · \(q.1)", maxSplats == q.2) }
+                }
+            } label: { chip(symbol: "sparkles", text: qualityLabel) }
+            Menu {
+                Section("Which way is up") {
+                    if let up = splats?.pcUpOrientation() {
+                        Button { orientation = up } label: { Label("From SplatForge", systemImage: "desktopcomputer") }
+                    }
+                    Button { if let s = splats { orientation = s.autoLevelOrientation() } } label: {
+                        Label("Auto level (ground down)", systemImage: "level")
+                    }
+                    Button { orientation = matrix_identity_float3x3 } label: { Label("As exported", systemImage: "arrow.uturn.backward") }
+                    Button { orientation = turn(.init(1, 0, 0), .pi) * orientation } label: { Label("Upside down", systemImage: "arrow.up.arrow.down") }
+                    Button { orientation = turn(.init(1, 0, 0), .pi / 2) * orientation } label: { Label("Tip forward 90°", systemImage: "rotate.right") }
+                    Button { orientation = turn(.init(0, 0, 1), .pi / 2) * orientation } label: { Label("Tip sideways 90°", systemImage: "rotate.left") }
+                }
+                if !arMode {
+                    Section("Background") {
+                        ForEach(SplatBackground.allCases, id: \.self) { b in
+                            Button { background = b.rawValue } label: { check(b.title, background == b.rawValue) }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis").frame(width: 22, height: 22)
+            }
+            .glassButton()
+            .accessibilityLabel("More")
+        }
+        .padding(8)
+        .glassCard(cornerRadius: 30)
+    }
+
+    private var modeSwitch: some View {
+        HStack(spacing: 2) {
+            ForEach([false, true], id: \.self) { ar in
+                Button { arMode = ar } label: {
+                    Label(ar ? "AR" : "3D", systemImage: ar ? "arkit" : "cube")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background {
+                            if arMode == ar { Capsule().fill(.white.opacity(0.22)) }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(.black.opacity(0.25)))
+    }
+
+    private func chip(symbol: String, text: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol).font(.caption)
+            Text(text).font(.subheadline.weight(.semibold)).monospacedDigit()
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Capsule().fill(.white.opacity(0.12)))
+        .foregroundStyle(.white)
+    }
+
+    @ViewBuilder
+    private func check(_ title: String, _ on: Bool) -> some View {
+        if on { Label(title, systemImage: "checkmark") } else { Text(title) }
+    }
+
+    /// Tips show for a few seconds; errors stay.
+    private func showHint(_ text: String) {
+        guard splats != nil else { return }
+        hint = text
+        let shown = text
+        Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await MainActor.run { if hint == shown && !shown.hasPrefix("Could not") { hint = nil } }
+        }
     }
 
     private func load() async {
@@ -1050,13 +1199,15 @@ struct SplatViewerScreen: View {
                 let limit = maxSplats
                 loaded = try await Task.detached { try SplatLoader.loadPLY(url, device: device, maxSplats: limit) }.value
             }
-            // Level it on load: trained scenes often come out tilted or on their side.
-            orientation = loaded.autoLevelOrientation()
+            // Level it: SplatForge's up when it sent one, else find the ground.
+            orientation = loaded.pcUpOrientation() ?? loaded.autoLevelOrientation()
             loaded.orientation = orientation
             splats = loaded
-            status = String(format: "%.2f M splats · drag to orbit · pinch to zoom · two fingers to move · double-tap to reset",
-                            Double(loaded.count) / 1e6)
+            status = arMode ? "Move the phone a little, then tap the floor to place the scan"
+                            : "Drag to orbit · pinch to zoom · two fingers to move · double-tap to reset"
+            showHint(status)
         } catch {
+            failed = true
             status = "Could not load: \(error.localizedDescription)"
         }
     }
@@ -1069,10 +1220,12 @@ struct SplatCanvas: UIViewRepresentable {
     let orientation: simd_float3x3
     let background: SplatBackground
     let modelScale: Float
+    var resetToken: Int = 0
     let inPlaceMap: URL?
     @Binding var status: String
 
     final class Container: UIView {
+        var lastReset = 0
         var orbit: OrbitSplatView?
         var ar: ARSplatView?
     }
@@ -1119,6 +1272,10 @@ struct SplatCanvas: UIViewRepresentable {
                 container.orbit?.resetCamera()
             }
             if container.orbit?.background != background { container.orbit?.background = background }
+            if container.lastReset != resetToken {
+                container.lastReset = resetToken
+                container.orbit?.resetCamera()
+            }
         }
     }
 
