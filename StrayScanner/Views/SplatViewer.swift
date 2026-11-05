@@ -50,31 +50,112 @@ final class SplatData {
     let count: Int
     let buffer: MTLBuffer
     let positions: [SIMD3<Float>]
-    let center: SIMD3<Float>
-    let radius: Float
-    let floorY: Float
+    /// Turns the file's coordinates upright (world = orientation × file). Set by auto-level or the Level menu.
+    var orientation = matrix_identity_float3x3 { didSet { if orientation != oldValue { computeStats() } } }
+    /// Framing in the upright frame (robust: median and 5–95th percentile, so far floaters don't count).
+    private(set) var center = SIMD3<Float>(repeating: 0)
+    private(set) var radius: Float = 1
+    private(set) var floorY: Float = 0
+    /// Robust subsample of positions (file coordinates) used for framing and levelling.
+    private let sample: [SIMD3<Float>]
 
     init(count: Int, buffer: MTLBuffer, positions: [SIMD3<Float>]) {
         self.count = count
         self.buffer = buffer
         self.positions = positions
-        // Robust framing: trained splats always have a few floaters very far away, so use the median and the
-        // 5th–95th percentile per axis instead of the mean and the full bounding box.
-        var xs: [Float] = [], ys: [Float] = [], zs: [Float] = []
+        var picked: [SIMD3<Float>] = []
         let stride = max(count / 60_000, 1)
         var i = 0
         while i < count {
             let p = positions[i]
-            if p.x.isFinite && p.y.isFinite && p.z.isFinite { xs.append(p.x); ys.append(p.y); zs.append(p.z) }
+            if p.x.isFinite && p.y.isFinite && p.z.isFinite { picked.append(p) }
             i += stride
         }
-        xs.sort(); ys.sort(); zs.sort()
-        func pick(_ a: [Float], _ f: Float) -> Float { a.isEmpty ? 0 : a[min(Int(Float(a.count - 1) * f), a.count - 1)] }
-        center = SIMD3(pick(xs, 0.5), pick(ys, 0.5), pick(zs, 0.5))
-        let lo = SIMD3(pick(xs, 0.05), pick(ys, 0.05), pick(zs, 0.05))
-        let hi = SIMD3(pick(xs, 0.95), pick(ys, 0.95), pick(zs, 0.95))
-        floorY = pick(ys, 0.02)
+        sample = picked
+        computeStats()
+    }
+
+    var orientation4: simd_float4x4 {
+        let r = orientation
+        return simd_float4x4(SIMD4(r.columns.0, 0), SIMD4(r.columns.1, 0), SIMD4(r.columns.2, 0), SIMD4(0, 0, 0, 1))
+    }
+
+    private static func percentile(_ a: [Float], _ f: Float) -> Float {
+        a.isEmpty ? 0 : a[min(Int(Float(a.count - 1) * f), a.count - 1)]
+    }
+
+    private func computeStats() {
+        let pts = sample.map { orientation * $0 }
+        let xs = pts.map(\.x).sorted(), ys = pts.map(\.y).sorted(), zs = pts.map(\.z).sorted()
+        let P = SplatData.percentile
+        center = SIMD3(P(xs, 0.5), P(ys, 0.5), P(zs, 0.5))
+        let lo = SIMD3(P(xs, 0.05), P(ys, 0.05), P(zs, 0.05))
+        let hi = SIMD3(P(xs, 0.95), P(ys, 0.95), P(zs, 0.95))
+        floorY = P(ys, 0.02)
         radius = max(simd_length(hi - lo) * 0.5, 0.5)
+    }
+
+    /// Finds "up": the ground (or floor) is the scene's flattest direction, so take the axis of least spread of the
+    /// central 90 % of splats; the ground is a dense layer at the bottom with things sticking up, so the side the
+    /// distribution trails off to is up. Returns identity when the scene is not flat enough to tell.
+    func autoLevelOrientation() -> simd_float3x3 {
+        guard sample.count > 100 else { return matrix_identity_float3x3 }
+        let xs = sample.map(\.x).sorted(), ys = sample.map(\.y).sorted(), zs = sample.map(\.z).sorted()
+        let P = SplatData.percentile
+        let lo = SIMD3(P(xs, 0.05), P(ys, 0.05), P(zs, 0.05)), hi = SIMD3(P(xs, 0.95), P(ys, 0.95), P(zs, 0.95))
+        let core = sample.filter { all($0 .>= lo) && all($0 .<= hi) }
+        guard core.count > 100 else { return matrix_identity_float3x3 }
+        let mean = core.reduce(SIMD3<Float>(repeating: 0), +) / Float(core.count)
+        var c = simd_float3x3(0)
+        for p in core {
+            let d = p - mean
+            c += simd_float3x3(columns: (d * d.x, d * d.y, d * d.z))
+        }
+        c = c * (1 / Float(core.count))
+        let (values, vectors) = SplatData.symmetricEigen(c)
+        // values ascending
+        guard values.0 < 0.45 * values.1 else { return matrix_identity_float3x3 }
+        var up = simd_normalize(vectors.0)
+        var m3: Float = 0, m2: Float = 0
+        for p in core { let t = simd_dot(p - mean, up); m2 += t * t; m3 += t * t * t }
+        let skew = (m3 / Float(core.count)) / pow(max(m2 / Float(core.count), 1e-9), 1.5)
+        if skew < -0.15 || (abs(skew) <= 0.15 && up.y < 0) { up = -up }
+        let q = simd_quatf(from: up, to: SIMD3<Float>(0, 1, 0))
+        return simd_float3x3(q)
+    }
+
+    /// Jacobi eigen-decomposition of a symmetric 3×3 matrix; eigenvalues ascending with their vectors.
+    static func symmetricEigen(_ m: simd_float3x3) -> ((Float, Float, Float), (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)) {
+        var a = [[Float]](repeating: [0, 0, 0], count: 3)
+        for i in 0..<3 { for j in 0..<3 { a[i][j] = m[j][i] } }
+        var v: [[Float]] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        for _ in 0..<32 {
+            var p = 0, q = 1
+            var best = abs(a[0][1])
+            if abs(a[0][2]) > best { best = abs(a[0][2]); p = 0; q = 2 }
+            if abs(a[1][2]) > best { best = abs(a[1][2]); p = 1; q = 2 }
+            if best < 1e-12 { break }
+            let theta = (a[q][q] - a[p][p]) / (2 * a[p][q])
+            let t = (theta >= 0 ? 1 : -1) / (abs(theta) + sqrt(theta * theta + 1))
+            let cs = 1 / sqrt(t * t + 1), sn = t * cs
+            for k in 0..<3 {
+                let akp = a[k][p], akq = a[k][q]
+                a[k][p] = cs * akp - sn * akq
+                a[k][q] = sn * akp + cs * akq
+            }
+            for k in 0..<3 {
+                let apk = a[p][k], aqk = a[q][k]
+                a[p][k] = cs * apk - sn * aqk
+                a[q][k] = sn * apk + cs * aqk
+            }
+            for k in 0..<3 {
+                let vkp = v[k][p], vkq = v[k][q]
+                v[k][p] = cs * vkp - sn * vkq
+                v[k][q] = sn * vkp + cs * vkq
+            }
+        }
+        let pairs = (0..<3).map { i in (a[i][i], SIMD3<Float>(v[0][i], v[1][i], v[2][i])) }.sorted { $0.0 < $1.0 }
+        return ((pairs[0].0, pairs[1].0, pairs[2].0), (pairs[0].1, pairs[1].1, pairs[2].1))
     }
 }
 
@@ -357,8 +438,6 @@ private func uniformScale(_ s: Float) -> simd_float4x4 {
     return simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1))
 }
 
-/// 180° about X: turns y-down (COLMAP/OpenCV style) scenes upright.
-private let flipX = simd_float4x4(diagonal: SIMD4<Float>(1, -1, -1, 1))
 
 private let cameraQuad: [Float] = [
     -1.0, -1.0, 1.0, 1.0,
@@ -375,8 +454,6 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
     private var yaw: Float = 0, pitch: Float = 0.35, distance: Float = 3
     private var target = SIMD3<Float>(0, 0, 0)
     private let inFlight = DispatchSemaphore(value: 3)
-    var flipped = false { didSet { if flipped != oldValue { resetCamera() } } }
-
     init(device: MTLDevice, splats: SplatData) {
         super.init(frame: .zero, device: device)
         colorPixelFormat = .bgra8Unorm
@@ -398,10 +475,9 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
 
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    private func resetCamera() {
+    func resetCamera() {
         guard let splats = renderer?.splats else { return }
-        let c = splats.center
-        target = flipped ? SIMD3<Float>(c.x, -c.y, -c.z) : c
+        target = splats.center
         distance = splats.radius * 1.6
         yaw = 0
         pitch = 0.35
@@ -444,7 +520,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         let size = drawableSize
         let eye = target + distance * SIMD3<Float>(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch))
         var viewMatrix = ScanRenderer.lookAt(eye: eye, target: target, up: SIMD3<Float>(0, 1, 0))
-        if flipped { viewMatrix = viewMatrix * flipX }
+        viewMatrix = viewMatrix * (renderer.splats.orientation4)
         let projection = ScanRenderer.perspective(fovY: Float(60.0 * Double.pi / 180.0),
                                                   aspect: Float(size.width / max(size.height, 1)),
                                                   near: max(distance * 0.01, 0.01), far: max(distance * 50, 100))
@@ -468,7 +544,7 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     private var angle: Float = 0
     private var model = matrix_identity_float4x4
     private let inFlight = DispatchSemaphore(value: 3)
-    var flipped = false { didSet { updateModel() } }
+    func orientationChanged() { updateModel() }
     /// 1 = real size (walk inside), 0.1 = 1:10 model, …
     var modelScale: Float = 1 { didSet { updateModel() } }
     var onStatus: ((String) -> Void)?
@@ -553,11 +629,8 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     private func updateModel() {
         guard let splats = renderer?.splats, let placement = placement else { return }
         // The splat's floor point (2nd percentile height, under its centre) goes to the tapped spot.
-        var anchor = SIMD3<Float>(splats.center.x, splats.floorY, splats.center.z)
-        if flipped { anchor = SIMD3<Float>(anchor.x, -anchor.y, -anchor.z) }
-        var m = translation(placement) * rotationY(angle) * uniformScale(modelScale) * translation(-anchor)
-        if flipped { m = m * flipX }
-        model = m
+        let anchor = SIMD3<Float>(splats.center.x, splats.floorY, splats.center.z)
+        model = translation(placement) * rotationY(angle) * uniformScale(modelScale) * translation(-anchor) * splats.orientation4
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -616,16 +689,25 @@ final class ARSplatView: MTKView, MTKViewDelegate {
 
 // MARK: - SwiftUI screen
 
+private func turn(_ axis: SIMD3<Float>, _ angle: Float) -> simd_float3x3 {
+    return simd_float3x3(simd_quatf(angle: angle, axis: axis))
+}
+
 struct SplatViewerScreen: View {
     let source: SplatSource
     @Environment(\.dismiss) private var dismiss
     @State private var splats: SplatData?
     @State private var status = "Loading…"
     @State private var arMode = false
-    @State private var flipped = false
+    @State private var orientation = matrix_identity_float3x3
     @State private var scaleIndex = 0
     @State private var inPlace = false
-    private let maxSplats = 1_000_000
+    /// Quality = how many splats are loaded (the PC thins the file evenly). More looks sharper but uses more memory
+    /// and the phone sorts them every frame, so very large counts get slower.
+    @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
+    private let qualities: [(String, Int)] = [("Draft · 0.3 M", 300_000), ("Normal · 1 M", 1_000_000),
+                                              ("High · 2 M", 2_000_000), ("Very high · 3 M", 3_000_000),
+                                              ("All splats", 50_000_000)]
     private let scales: [(String, Float)] = [("1:1", 1), ("1:10", 0.1), ("1:50", 0.02)]
 
     var body: some View {
@@ -633,7 +715,7 @@ struct SplatViewerScreen: View {
             ZStack(alignment: .bottom) {
                 Color.black.ignoresSafeArea()
                 if let splats = splats {
-                    SplatCanvas(splats: splats, arMode: arMode, flipped: flipped,
+                    SplatCanvas(splats: splats, arMode: arMode, orientation: orientation,
                                 modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
                                 status: $status)
                         .id(inPlace)
@@ -666,13 +748,38 @@ struct SplatViewerScreen: View {
                             .pickerStyle(.segmented)
                             .frame(width: 150)
                         }
-                        Button {
-                            flipped.toggle()
+                        Menu {
+                            Section("Which way is up") {
+                                Button { if let s = splats { orientation = s.autoLevelOrientation() } } label: {
+                                    Label("Auto level (ground down)", systemImage: "level")
+                                }
+                                Button { orientation = matrix_identity_float3x3 } label: {
+                                    Label("As exported", systemImage: "arrow.uturn.backward")
+                                }
+                                Button { orientation = turn(.init(1, 0, 0), .pi) * orientation } label: {
+                                    Label("Upside down", systemImage: "arrow.up.arrow.down")
+                                }
+                                Button { orientation = turn(.init(1, 0, 0), .pi / 2) * orientation } label: {
+                                    Label("Tip forward 90°", systemImage: "rotate.right")
+                                }
+                                Button { orientation = turn(.init(0, 0, 1), .pi / 2) * orientation } label: {
+                                    Label("Tip sideways 90°", systemImage: "rotate.left")
+                                }
+                            }
+                            Section("Quality (splats loaded)") {
+                                ForEach(qualities, id: \.1) { q in
+                                    Button {
+                                        if maxSplats != q.1 { maxSplats = q.1; splats = nil; status = "Loading…" }
+                                    } label: {
+                                        if maxSplats == q.1 { Label(q.0, systemImage: "checkmark") } else { Text(q.0) }
+                                    }
+                                }
+                            }
                         } label: {
-                            Image(systemName: "arrow.up.arrow.down")
+                            Image(systemName: "slider.horizontal.3")
                         }
                         .glassButton()
-                        .accessibilityLabel("Flip upside down")
+                        .accessibilityLabel("Orientation and quality")
                     }
                     .padding(10)
                     .glassCard(cornerRadius: 24)
@@ -684,7 +791,7 @@ struct SplatViewerScreen: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
             }
-            .task { await load() }
+            .task(id: maxSplats) { await load() }
         }
         .preferredColorScheme(.dark)
     }
@@ -703,6 +810,9 @@ struct SplatViewerScreen: View {
                 let limit = maxSplats
                 loaded = try await Task.detached { try SplatLoader.loadPLY(url, device: device, maxSplats: limit) }.value
             }
+            // Level it on load: trained scenes often come out tilted or on their side.
+            orientation = loaded.autoLevelOrientation()
+            loaded.orientation = orientation
             splats = loaded
             status = String(format: "%.2f M splats · drag to orbit · pinch to zoom · two fingers to move · double-tap to reset",
                             Double(loaded.count) / 1e6)
@@ -716,7 +826,7 @@ struct SplatViewerScreen: View {
 struct SplatCanvas: UIViewRepresentable {
     let splats: SplatData
     let arMode: Bool
-    let flipped: Bool
+    let orientation: simd_float3x3
     let modelScale: Float
     let inPlaceMap: URL?
     @Binding var status: String
@@ -747,7 +857,10 @@ struct SplatCanvas: UIViewRepresentable {
                 container.ar = ar
                 ar.start()
             }
-            container.ar?.flipped = flipped
+            if splats.orientation != orientation {
+                splats.orientation = orientation
+            }
+            container.ar?.orientationChanged()
             container.ar?.modelScale = modelScale
         } else {
             container.ar?.stop()
@@ -760,7 +873,10 @@ struct SplatCanvas: UIViewRepresentable {
                 container.addSubview(orbit)
                 container.orbit = orbit
             }
-            container.orbit?.flipped = flipped
+            if splats.orientation != orientation {
+                splats.orientation = orientation
+                container.orbit?.resetCamera()
+            }
         }
     }
 
