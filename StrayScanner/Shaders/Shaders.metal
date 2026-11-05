@@ -228,23 +228,28 @@ vertex GSOut gsVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float l2 = max(mid - disc, 0.0);
     float2 v1 = abs(b) > 1e-7 ? normalize(float2(b, l1 - a)) : (a >= c ? float2(1, 0) : float2(0, 1));
     float2 v2 = float2(-v1.y, v1.x);
-    float r1 = 3.0 * sqrt(l1);
-    float r2 = 3.0 * sqrt(l2);
+    // Draw only as far out as the splat stays visible: alpha·exp(-k²/2) = 1/255 → k = sqrt(2·ln(255·alpha)).
+    // Faint splats get much smaller quads than a fixed 3σ — far less overdraw, the main cost on phones.
+    float alpha0 = float(s.color.a) / 255.0;
+    if (alpha0 < 1.5 / 255.0) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
+    float k = min(sqrt(2.0 * log(255.0 * alpha0)), 3.0);
+    float r1 = k * sqrt(l1);
+    float r2 = k * sqrt(l2);
     if (r1 > 1500.0 || r1 < 0.3) { o.position = float4(2.0, 2.0, 2.0, 1.0); return o; }
 
     float2 corner = float2((vid & 1) ? 1.0 : -1.0, (vid & 2) ? 1.0 : -1.0);
     float2 offsetPx = corner.x * v1 * r1 + corner.y * v2 * r2;
     float2 ndc = offsetPx / (u.viewport * 0.5);
     o.position = clip + float4(ndc * clip.w, 0.0, 0.0);
-    o.local = corner * 3.0;
+    o.local = corner * k;
     return o;
 }
 
 fragment half4 gsFragment(GSOut in [[stage_in]]) {
-    float g = exp(-0.5 * dot(in.local, in.local));
-    float alpha = float(in.color.a) * g;
-    if (alpha < 1.0 / 255.0) {
+    half r2 = half(dot(in.local, in.local));
+    half alpha = in.color.a * exp(-0.5h * r2);
+    if (alpha < half(1.0 / 255.0)) {
         discard_fragment();
     }
-    return half4(in.color.rgb * half(alpha), half(alpha));   // premultiplied, drawn back to front
+    return half4(in.color.rgb * alpha, alpha);   // premultiplied, drawn back to front
 }

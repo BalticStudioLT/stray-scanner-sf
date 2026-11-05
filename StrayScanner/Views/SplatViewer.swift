@@ -312,8 +312,17 @@ final class GaussianSplatRenderer {
     private var lastSortedView: simd_float4x4?
     private let sortQueue = DispatchQueue(label: "splat.sort", qos: .userInitiated)
     private let lock = NSLock()
-    private var buckets = [UInt32](repeating: 0, count: 65536)
+    /// How many splats each order buffer holds (only the ones in view survive the sort).
+    private var orderCounts: [Int]
     private var keys: [UInt16] = []
+    private var depths: [Float] = []
+    private static let chunks = 8
+    private var histograms = [UInt32](repeating: 0, count: 65536 * GaussianSplatRenderer.chunks)
+    private var projectionForCull = matrix_identity_float4x4
+    /// Called (on any thread) when a new order is ready — on-demand views redraw then.
+    var onSorted: (() -> Void)?
+    /// Splats drawn last frame (after culling), for the status line.
+    private(set) var visibleCount = 0
 
     init?(device: MTLDevice, splats: SplatData, colorFormat: MTLPixelFormat) {
         guard let library = device.makeDefaultLibrary() else { return nil }
@@ -340,15 +349,20 @@ final class GaussianSplatRenderer {
         self.splats = splats
         self.pipeline = pipeline
         self.orderBuffers = buffers
+        self.orderCounts = [splats.count, 0, 0]
         keys = [UInt16](repeating: 0, count: splats.count)
+        depths = [Float](repeating: 0, count: splats.count)
     }
 
     /// Encodes the splats into an existing render encoder (colour target with the renderer's pixel format).
     func draw(_ encoder: MTLRenderCommandEncoder, view: simd_float4x4, projection: simd_float4x4, viewport: CGSize) {
-        requestSort(view: view)
+        requestSort(view: view, projection: projection)
         lock.lock()
         let order = orderBuffers[currentOrder]
+        let count = orderCounts[currentOrder]
         lock.unlock()
+        visibleCount = count
+        guard count > 0 else { return }
         var uniforms = GSUniforms(view: view, projection: projection,
                                   viewport: SIMD2<Float>(Float(viewport.width), Float(viewport.height)),
                                   focal: SIMD2<Float>(projection.columns.0.x * Float(viewport.width) * 0.5,
@@ -357,10 +371,10 @@ final class GaussianSplatRenderer {
         encoder.setVertexBuffer(splats.buffer, offset: 0, index: 0)
         encoder.setVertexBuffer(order, offset: 0, index: 1)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
-        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: splats.count)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
     }
 
-    private func requestSort(view: simd_float4x4) {
+    private func requestSort(view: simd_float4x4, projection: simd_float4x4) {
         lock.lock()
         defer { lock.unlock() }
         guard !sorting else { return }
@@ -370,54 +384,93 @@ final class GaussianSplatRenderer {
         }
         sorting = true
         lastSortedView = view
+        projectionForCull = projection
         let target = (currentOrder + 1) % orderBuffers.count
         sortQueue.async { [weak self] in
             self?.sort(view: view, into: target)
         }
     }
 
-    /// Bucket sort by view-space depth (65 536 buckets), farthest first.
+    /// Cull + bucket sort by view-space depth (65 536 buckets), farthest first, on all CPU cores:
+    /// 1) depth of every splat, dropping ones behind the camera or well outside the view (a wide margin so turning
+    ///    the phone doesn't show holes before the next sort), 2) per-core histograms, 3) stable parallel scatter.
     private func sort(view: simd_float4x4, into target: Int) {
         let n = splats.count
+        let chunks = GaussianSplatRenderer.chunks
         let r = SIMD4<Float>(view.columns.0.z, view.columns.1.z, view.columns.2.z, view.columns.3.z)
-        var lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
+        let rx = SIMD4<Float>(view.columns.0.x, view.columns.1.x, view.columns.2.x, view.columns.3.x)
+        let ry = SIMD4<Float>(view.columns.0.y, view.columns.1.y, view.columns.2.y, view.columns.3.y)
+        // Half-width of the view per metre of depth, with 60 % margin.
+        let tanX = 1.6 / max(projectionForCull.columns.0.x, 0.01)
+        let tanY = 1.6 / max(projectionForCull.columns.1.y, 0.01)
+        let per = (n + chunks - 1) / chunks
+        var los = [Float](repeating: .greatestFiniteMagnitude, count: chunks)
+        var his = [Float](repeating: -.greatestFiniteMagnitude, count: chunks)
         splats.positions.withUnsafeBufferPointer { positions in
-            for i in 0..<n {
-                let p = positions[i]
-                let z = r.x * p.x + r.y * p.y + r.z * p.z + r.w
-                lo = min(lo, z)
-                hi = max(hi, z)
+        depths.withUnsafeMutableBufferPointer { depths in
+        los.withUnsafeMutableBufferPointer { los in
+        his.withUnsafeMutableBufferPointer { his in
+            DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                var lo = Float.greatestFiniteMagnitude, hi = -Float.greatestFiniteMagnitude
+                for i in (c * per)..<min((c + 1) * per, n) {
+                    let p = SIMD4<Float>(positions[i], 1)
+                    let z = simd_dot(r, p)
+                    let d = -z
+                    // NaN marks culled splats.
+                    if d < 0.02 || abs(simd_dot(rx, p)) > d * tanX + 0.5 || abs(simd_dot(ry, p)) > d * tanY + 0.5 {
+                        depths[i] = .nan
+                        continue
+                    }
+                    depths[i] = z
+                    lo = min(lo, z); hi = max(hi, z)
+                }
+                los[c] = lo; his[c] = hi
             }
-            let scale = hi > lo ? 65535 / (hi - lo) : 0
-            keys.withUnsafeMutableBufferPointer { keys in
-                buckets.withUnsafeMutableBufferPointer { buckets in
-                    for i in 0..<65536 { buckets[i] = 0 }
-                    for i in 0..<n {
-                        let p = positions[i]
-                        let z = r.x * p.x + r.y * p.y + r.z * p.z + r.w
-                        let key = UInt16(min(max((z - lo) * scale, 0), 65535))   // more negative z = farther = first
-                        keys[i] = key
-                        buckets[Int(key)] += 1
-                    }
-                    var running: UInt32 = 0
-                    for i in 0..<65536 {
-                        let c = buckets[i]
-                        buckets[i] = running
-                        running += c
-                    }
-                    let out = orderBuffers[target].contents().bindMemory(to: UInt32.self, capacity: n)
-                    for i in 0..<n {
-                        let k = Int(keys[i])
-                        out[Int(buckets[k])] = UInt32(i)
-                        buckets[k] += 1
-                    }
+        }}}}
+        let lo = los.min() ?? 0, hi = his.max() ?? 0
+        let scale = hi > lo ? 65535 / (hi - lo) : 0
+        var visible = 0
+        depths.withUnsafeBufferPointer { depths in
+        keys.withUnsafeMutableBufferPointer { keys in
+        histograms.withUnsafeMutableBufferPointer { hist in
+            DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                let h = hist.baseAddress! + c * 65536
+                for k in 0..<65536 { h[k] = 0 }
+                for i in (c * per)..<min((c + 1) * per, n) {
+                    let z = depths[i]
+                    if z.isNaN { continue }
+                    let key = UInt16(min(max((z - lo) * scale, 0), 65535))   // more negative z = farther = first
+                    keys[i] = key
+                    h[Int(key)] += 1
                 }
             }
-        }
+            // Exclusive prefix over (bucket, chunk): bucket-major so the result is a stable sort.
+            var running: UInt32 = 0
+            for k in 0..<65536 {
+                for c in 0..<chunks {
+                    let v = hist[c * 65536 + k]
+                    hist[c * 65536 + k] = running
+                    running += v
+                }
+            }
+            visible = Int(running)
+            let out = orderBuffers[target].contents().bindMemory(to: UInt32.self, capacity: n)
+            DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                let h = hist.baseAddress! + c * 65536
+                for i in (c * per)..<min((c + 1) * per, n) {
+                    if depths[i].isNaN { continue }
+                    let k = Int(keys[i])
+                    out[Int(h[k])] = UInt32(i)
+                    h[k] += 1
+                }
+            }
+        }}}
         lock.lock()
+        orderCounts[target] = visible
         currentOrder = target
         sorting = false
         lock.unlock()
+        onSorted?()
     }
 }
 
@@ -462,6 +515,10 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         commandQueue = device.makeCommandQueue()
         renderer = GaussianSplatRenderer(device: device, splats: splats, colorFormat: colorPixelFormat)
         delegate = self
+        // Draw only when something changed (a gesture or a finished sort): no work and no battery use while still.
+        isPaused = true
+        enableSetNeedsDisplay = true
+        renderer?.onSorted = { [weak self] in DispatchQueue.main.async { self?.setNeedsDisplay() } }
         addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(pan(_:))))
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinch(_:))))
         let twoFinger = UIPanGestureRecognizer(target: self, action: #selector(twoFingerMove(_:)))
@@ -481,6 +538,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         distance = splats.radius * 1.6
         yaw = 0
         pitch = 0.35
+        setNeedsDisplay()
     }
 
     @objc private func resetTapped() { resetCamera() }
@@ -491,11 +549,13 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         g.setTranslation(.zero, in: self)
         yaw -= Float(d.x) * 0.008
         pitch = min(max(pitch + Float(d.y) * 0.006, -1.4), 1.4)
+        setNeedsDisplay()
     }
 
     @objc private func pinch(_ g: UIPinchGestureRecognizer) {
         distance = min(max(distance / Float(g.scale), 0.05), 500)
         g.scale = 1
+        setNeedsDisplay()
     }
 
     @objc private func twoFingerMove(_ g: UIPanGestureRecognizer) {
@@ -505,6 +565,13 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         let k = distance * 0.0015
         target -= right * Float(d.x) * k
         target += SIMD3<Float>(0, 1, 0) * Float(d.y) * k
+        setNeedsDisplay()
+    }
+
+    // 2× is plenty for soft splats and draws ~45 % fewer pixels than 3× (fill rate is the limit on phones).
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        contentScaleFactor = min(window?.screen.scale ?? 2, 2)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
