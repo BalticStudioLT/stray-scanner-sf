@@ -40,3 +40,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 23:46 "Search more tricks" — research: RT-Splatting (glass), mirror methods, Structured-Li-GS, PocketGS (on-phone training), Mobile-GS, SOG/SPZ/streamed SOG
 - 2026-11-05 23:48 (LT) "Jo pridek viska prie plano ir testavimu" → docs/ROADMAP.md (16 items with tests)
 - 2026-11-05 23:50 (LT) "Gal tokios medziagos jau yra mano skenavimuose. Mac turetu but vel prieinamas"
+- 2026-11-05 23:51 (LT) "Bet siaip kolkas su langais daug problemu nebuvo. Jie gan gerai gaunasi ant gaussian splatu" → glass item 4 set to low priority

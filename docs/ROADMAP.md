@@ -12,7 +12,7 @@ Status: ☐ not started · ◐ in progress · ☑ done
 | 1 | Live PC preview splat while scanning | PC + phone (phone ☑) | ◐ |
 | 2 | Actionable live tips, target spot, end verdict | PC + phone (phone ☑) | ◐ |
 | 3 | Masks: moving objects (optical flow), sky, glass, mirrors | phone → PC | ☐ |
-| 4 | Windows / glass without floaters (RT-Splatting idea) | PC (Fable) | ☐ |
+| 4 | Windows / glass without floaters (RT-Splatting idea) — **low priority**: owner 23:51, windows already come out well; only if a test shows a problem | PC (Fable) | ☐ |
 | 5 | Mirrors (mirror plane + masks) | PC (Fable) | ☐ |
 | 6 | LiDAR-anchored training (Structured-Li-GS idea) | PC (Fable) | ☐ |
 | 7 | LOD: coarse far, detailed near, streamed chunks | PC + phone | ☐ |
@@ -40,7 +40,7 @@ says "rescan" and names the corner. Second run covering everything → "good to 
 mask on static walls; sky/window/mirror masks visually correct on 20 random frames; training with masks has no ghost of
 the person (compare splats with/without masks from the same viewpoints).
 
-**4 Glass.** Test room window + one car window (tractor cab). Pass (Fable): fewer floaters behind glass (count splats
+**4 Glass (low priority, owner: windows already OK).** First just check existing scans; only work on it if a test fails. Test room window + one car window (tractor cab). Pass (Fable): fewer floaters behind glass (count splats
 behind the window plane), held-out PSNR on window views ≥ baseline, background through glass visibly clearer.
 
 **5 Mirrors.** Test room mirror. Pass: no "room behind the mirror" splats; mirror region held-out PSNR ≥ baseline.
