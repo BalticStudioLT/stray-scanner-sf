@@ -45,3 +45,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 23:52 (LT) "Pradek nuo lod, metal fx, ir kitu perfomance patobolinimu" → order changed: LOD, MetalFX, perf first; masks code parked (MotionMaskEncoder.swift, not in the build yet)
 - 2026-11-05 23:56 (LT) "Tesk darba"
 - 2026-11-05 23:59 "Dont push so often updates. Just finish app" → compile-only on the Mac, one install at the end
+- 2026-11-06 00:04 (LT) "Tesk telefono darbus"

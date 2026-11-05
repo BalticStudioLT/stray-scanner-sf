@@ -20,10 +20,10 @@ Status: ☐ not started · ◐ in progress · ☑ done
 | 9 | MetalFX upscaling + variable-rate edges | phone (MetalFX spatial ☑, dynamic resolution ☑ — full quality when still; AR at reduced res ☑; temporal/VRR not needed for now) | ☑ |
 | 10 | AR occlusion: real objects (LiDAR) cover the splat | phone | ☑ (needs owner test) |
 | 11 | Frame reuse when still / slow (battery) | phone (3D view draws only on change ☑; recorder preview at 30 fps ☑) | ☑ |
-| 12 | Better coverage guidance (area-weighted sphere of views) | phone | ☐ |
+| 12 | Better coverage guidance (area-weighted sphere of views) | phone (tips to the nearest surface seen from one side only, works without PC ☑) | ☑ |
 | 13 | Automatic guided-tour route from path + pins | PC | ☐ |
 | 14 | Enhancement during training (Difix3D+ idea), per-job switch | PC (Fable) | ☐ |
-| 15 | Sort-free "fast" viewer mode (Mobile-GS idea) | phone | ☐ |
+| 15 | Sort-free "fast" viewer mode (Mobile-GS idea) | phone (weighted blended OIT while moving in Fastest ☑) | ☑ (needs owner test) |
 | 16 | Splat training on the phone, no PC (PocketGS idea) | phone | ☐ |
 
 ## Tests

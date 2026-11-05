@@ -453,6 +453,35 @@ final class GaussianSplatRenderer {
         depthAttachment.sourceAlphaBlendFactor = .one
         depthAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         self.depthOutPipeline = try? device.makeRenderPipelineState(descriptor: descriptor)
+        // Sort-free pipeline (Fastest while moving).
+        let oit = MTLRenderPipelineDescriptor()
+        oit.vertexFunction = library.makeFunction(name: "gsVertex")
+        oit.fragmentFunction = library.makeFunction(name: "gsFragmentOIT")
+        let acc = oit.colorAttachments[0]!
+        acc.pixelFormat = .rgba16Float
+        acc.isBlendingEnabled = true
+        acc.sourceRGBBlendFactor = .one; acc.destinationRGBBlendFactor = .one
+        acc.sourceAlphaBlendFactor = .one; acc.destinationAlphaBlendFactor = .one
+        let rev = oit.colorAttachments[1]!
+        rev.pixelFormat = .r16Float
+        rev.isBlendingEnabled = true
+        rev.sourceRGBBlendFactor = .zero; rev.destinationRGBBlendFactor = .oneMinusSourceColor
+        rev.sourceAlphaBlendFactor = .zero; rev.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.oitPipeline = try? device.makeRenderPipelineState(descriptor: oit)
+        let resolve = MTLRenderPipelineDescriptor()
+        resolve.vertexFunction = library.makeFunction(name: "fullscreenQuad")
+        resolve.fragmentFunction = library.makeFunction(name: "oitResolve")
+        let out = resolve.colorAttachments[0]!
+        out.pixelFormat = colorFormat
+        out.isBlendingEnabled = true
+        out.sourceRGBBlendFactor = .one; out.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        out.sourceAlphaBlendFactor = .one; out.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.oitResolvePipeline = try? device.makeRenderPipelineState(descriptor: resolve)
+        if let identity = device.makeBuffer(length: splats.count * 4, options: .storageModeShared) {
+            let p = identity.contents().bindMemory(to: UInt32.self, capacity: splats.count)
+            for i in 0..<splats.count { p[i] = UInt32(i) }
+            self.identityOrder = identity
+        }
         var buffers: [MTLBuffer] = []
         for _ in 0..<3 {
             guard let b = device.makeBuffer(length: splats.count * 4, options: .storageModeShared) else { return nil }
@@ -484,6 +513,65 @@ final class GaussianSplatRenderer {
     /// Encodes the splats into an existing render encoder (colour target with the renderer's pixel format).
     private var lastViewport = CGSize(width: 1000, height: 1000)
     private var depthOutPipeline: MTLRenderPipelineState?
+    private var oitPipeline: MTLRenderPipelineState?
+    private var oitResolvePipeline: MTLRenderPipelineState?
+    private var identityOrder: MTLBuffer?
+    private var oitAccum: MTLTexture?
+    private var oitReveal: MTLTexture?
+    var supportsSortFree: Bool { oitPipeline != nil && oitResolvePipeline != nil && identityOrder != nil }
+
+    /// Sort-free draw into `target` (cleared to `clear`): no depth sort, two passes. Used while moving in Fastest.
+    func drawSortFree(_ cb: MTLCommandBuffer, target: MTLTexture, clear: MTLClearColor,
+                      view: simd_float4x4, projection: simd_float4x4) {
+        guard let oit = oitPipeline, let resolve = oitResolvePipeline, let order = identityOrder else { return }
+        let w = target.width, h = target.height
+        if oitAccum?.width != w || oitAccum?.height != h {
+            let a = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
+            a.usage = [.renderTarget, .shaderRead]; a.storageMode = .private
+            let r = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: w, height: h, mipmapped: false)
+            r.usage = [.renderTarget, .shaderRead]; r.storageMode = .private
+            oitAccum = device.makeTexture(descriptor: a)
+            oitReveal = device.makeTexture(descriptor: r)
+        }
+        guard let accum = oitAccum, let reveal = oitReveal else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = accum
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[1].texture = reveal
+        pass.colorAttachments[1].loadAction = .clear
+        pass.colorAttachments[1].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
+        pass.colorAttachments[1].storeAction = .store
+        if let enc = cb.makeRenderCommandEncoder(descriptor: pass) {
+            var uniforms = GSUniforms(view: view, projection: projection,
+                                      viewport: SIMD2<Float>(Float(w), Float(h)),
+                                      focal: SIMD2<Float>(projection.columns.0.x * Float(w) * 0.5,
+                                                          projection.columns.1.y * Float(h) * 0.5))
+            let eye = view.inverse.columns.3
+            uniforms.cameraPos = SIMD4<Float>(eye.x / eye.w, eye.y / eye.w, eye.z / eye.w, 1)
+            uniforms.hasSH = splats.sh != nil ? 1 : 0
+            enc.setRenderPipelineState(oit)
+            enc.setVertexBuffer(splats.buffer, offset: 0, index: 0)
+            enc.setVertexBuffer(order, offset: 0, index: 1)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<GSUniforms>.stride, index: 2)
+            enc.setVertexBuffer(splats.sh ?? splats.buffer, offset: 0, index: 3)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: splats.count)
+            enc.endEncoding()
+        }
+        let out = MTLRenderPassDescriptor()
+        out.colorAttachments[0].texture = target
+        out.colorAttachments[0].loadAction = .clear
+        out.colorAttachments[0].clearColor = clear
+        out.colorAttachments[0].storeAction = .store
+        if let enc = cb.makeRenderCommandEncoder(descriptor: out) {
+            enc.setRenderPipelineState(resolve)
+            enc.setFragmentTexture(accum, index: 0)
+            enc.setFragmentTexture(reveal, index: 1)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            enc.endEncoding()
+        }
+    }
     /// Use with a render pass that has colour attachment 1 = rgba16Float (depth for AR occlusion).
     var writesDepth = false
     private var activePipeline: MTLRenderPipelineState { (writesDepth ? depthOutPipeline : nil) ?? pipeline }
@@ -861,7 +949,9 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
             lowPass.colorAttachments[0].loadAction = .clear
             lowPass.colorAttachments[0].storeAction = .store
             lowPass.colorAttachments[0].clearColor = clearColor
-            if let lowEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: lowPass) {
+            if speed == .fast, renderer.supportsSortFree {
+                renderer.drawSortFree(commandBuffer, target: low, clear: clearColor, view: viewMatrix, projection: projection)
+            } else if let lowEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: lowPass) {
                 renderer.draw(lowEncoder, view: viewMatrix, projection: projection,
                               viewport: CGSize(width: low.width, height: low.height))
                 lowEncoder.endEncoding()

@@ -552,3 +552,38 @@ fragment half4 compositePremultiplied(CompositeOut in [[stage_in]],
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     return splats.sample(s, in.uv);   // premultiplied: blended with one / one-minus-source-alpha
 }
+
+// MARK: - Sort-free "fast" splats (weighted blended order-independent transparency, McGuire & Bavoil 2013)
+// No depth sort at all: every splat adds into two targets, a final pass divides. Slight smearing where surfaces
+// overlap, so it is only used while the view moves in the Fastest setting.
+
+struct GSOITOut {
+    half4 accum [[color(0)]];    // Σ w·(rgb·α, α)
+    half reveal [[color(1)]];    // Π (1 − α)  via blend zero / one-minus-source-colour
+};
+
+fragment GSOITOut gsFragmentOIT(GSOut in [[stage_in]]) {
+    half r2 = half(dot(in.local, in.local));
+    half alpha = in.color.a * exp(-0.5h * r2);
+    if (alpha < half(1.0 / 255.0)) {
+        discard_fragment();
+    }
+    float z = in.viewDepth;
+    float w = clamp(0.03 / (1e-5 + pow(z / 200.0, 4.0)), 1e-2, 3e3) * float(alpha);
+    GSOITOut o;
+    o.accum = half4(half3(float3(in.color.rgb) * float(alpha) * w), half(float(alpha) * w));
+    o.reveal = alpha;
+    return o;
+}
+
+fragment half4 oitResolve(CompositeOut in [[stage_in]],
+                          texture2d<half, access::read> accum [[ texture(0) ]],
+                          texture2d<half, access::read> reveal [[ texture(1) ]]) {
+    uint2 p = uint2(in.position.xy);
+    half4 a = accum.read(p);
+    half r = reveal.read(p).r;
+    half coverage = 1.0h - r;
+    if (coverage < 0.002h) discard_fragment();
+    half3 color = a.rgb / max(a.a, 1e-4h);
+    return half4(color * coverage, coverage);   // premultiplied over the background
+}

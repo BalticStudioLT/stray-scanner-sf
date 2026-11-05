@@ -96,7 +96,7 @@ final class PointCloudAccumulator {
            let fine = device.makeBuffer(length: PointCloudAccumulator.fineTableSize * 4, options: .storageModePrivate),
            let covTable = device.makeBuffer(length: PointCloudAccumulator.coverageTableSize * 4, options: .storageModePrivate),
            let covSlots = device.makeBuffer(length: PointCloudAccumulator.coverageTableSize * 4, options: .storageModePrivate),
-           let covMasks = device.makeBuffer(length: coverageCapacity * 4, options: .storageModePrivate),
+           let covMasks = device.makeBuffer(length: coverageCapacity * 4, options: .storageModeShared),
            let cache = cache {
             gpu = GPU(queue: queue, sample: sample, append: append, counters: counters, fineTable: fine,
                       coverageTable: covTable, coverageSlots: covSlots, coverageMasks: covMasks, textureCache: cache)
@@ -389,6 +389,28 @@ final class PointCloudAccumulator {
         let pointer = coverageBuffer.contents().bindMemory(to: PointCloudVertex.self, capacity: coverageCapacity)
         pointer[slot] = PointCloudVertex(position: SIMD4<Float>(center.x, center.y, center.z, 0.07),
                                          color: PointCloudAccumulator.coverageColor(views: views))
+    }
+
+    /// Where the most surface seen from only one direction is (within 0.5–4 m of `camera`), for "film this from
+    /// another angle" tips without the PC. Reads the GPU coverage data (shared memory), a few ms; call every few seconds.
+    func weakestArea(camera: SIMD3<Float>) -> (center: SIMD3<Float>, voxels: Int)? {
+        let n = min(coverageCount, coverageCapacity)
+        guard n > 50 else { return nil }
+        let vertices = coverageBuffer.contents().bindMemory(to: PointCloudVertex.self, capacity: coverageCapacity)
+        let masks: UnsafeMutablePointer<UInt32>? = gpu.map { $0.coverageMasks.contents().bindMemory(to: UInt32.self, capacity: coverageCapacity) }
+        var cells: [Int64: (sum: SIMD3<Float>, count: Int)] = [:]
+        for i in 0..<n {
+            let views = masks.map { $0[i].nonzeroBitCount } ?? (i < coverageMasks.count ? coverageMasks[i].nonzeroBitCount : 3)
+            guard views == 1 else { continue }
+            let p = SIMD3<Float>(vertices[i].position.x, vertices[i].position.y, vertices[i].position.z)
+            let d = simd_distance(p, camera)
+            guard d > 0.5, d < 4 else { continue }
+            let key = voxelKey(p, size: 0.5)
+            let c = cells[key] ?? (.zero, 0)
+            cells[key] = (c.sum + p, c.count + 1)
+        }
+        guard let best = cells.values.max(by: { $0.count < $1.count }), best.count >= 6 else { return nil }
+        return (best.sum / Float(best.count), best.count)
     }
 
     static func coverageColor(views: Int) -> SIMD4<Float> {

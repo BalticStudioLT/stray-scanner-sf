@@ -815,6 +815,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 advice = pcHint
             } else if startedRecording != nil, let gap = nearestPCGap() {
                 advice = gap
+            } else if startedRecording != nil, let weak = weakSpotAdvice() {
+                advice = weak
             } else if let guide = wallGuide.advice() {
                 advice = guide
             }
@@ -855,6 +857,29 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if abs(right) > abs(up) && abs(right) > forward * 0.4 { return right > 0 ? ("to your right", "arrow.right") : ("to your left", "arrow.left") }
         if abs(up) > forward * 0.4 { return up > 0 ? ("higher up", "arrow.up") : ("lower down", "arrow.down") }
         return ("ahead", "scope")
+    }
+
+    private var lastWeakCheck = Date.distantPast
+    private var weakAdvice: ScanAdvice?
+
+    /// Phone-only guidance (no PC needed): the nearest patch of surface seen from just one direction.
+    private func weakSpotAdvice() -> ScanAdvice? {
+        guard let frame = lastFrame, let cloud = renderer?.pointCloud else { return nil }
+        if Date().timeIntervalSince(lastWeakCheck) > 2 {
+            lastWeakCheck = Date()
+            let t = frame.camera.transform.columns.3
+            if let spot = cloud.weakestArea(camera: SIMD3<Float>(t.x, t.y, t.z)) {
+                let local4 = frame.camera.transform.inverse * SIMD4<Float>(spot.center, 1)
+                let local = SIMD3<Float>(local4.x, local4.y, local4.z)
+                let (direction, symbol) = describeDirection(local)
+                weakAdvice = ScanAdvice(level: .info,
+                                        text: String(format: "Seen from one side only: %.1f m %@ — film it from another angle", simd_length(local), direction),
+                                        symbolName: symbol)
+            } else {
+                weakAdvice = nil
+            }
+        }
+        return weakAdvice
     }
 
     private func nearestPCGap() -> ScanAdvice? {
