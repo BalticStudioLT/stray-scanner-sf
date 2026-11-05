@@ -17,7 +17,7 @@ Authentication: every request carries the Studio token (`A:\AI\SplatForge\.studi
 | Results (projects, runs, PSNR, splats) | `GET /api/projects` |
 | Full Studio inside the app (viewer, editing, show mode) | `GET /?t=<token>` in a web view |
 
-## 2. To implement on the PC (SplatForge side)
+## 2. PC side (all implemented in SplatForge on 2026-11-05 01:50, see its docs/agents/TO_STRAY_SF.md)
 
 All under the same server and token check (`H._auth`). JSON answers unless stated.
 
@@ -56,7 +56,7 @@ Ideas for the PC side, in order of value: (1) voxel coverage from the streamed p
 holes and under-observed surfaces; (2) blur/overlap check per area from the poses → "go back to …" hints;
 (3) a quick preview splat trained from the streamed JPEGs + points (Studio show mode).
 
-### 2.3 Finished splats on the phone — planned app feature (needs these endpoints)
+### 2.3 Finished splats on the phone (app: SplatForge ▸ Results ▸ tap a run; AR "in place" via `source_scan`)
 - `GET /stray/results` → `[{"project","run","psnr","splats","done":true,"bytes_ply","source_scan":"<stray folder or null>",
   "scan_to_splat":[16 floats or null]}]` — finished runs; `source_scan` and `scan_to_splat` (column-major 4×4 that maps
   ARKit world coordinates of that Stray scan into splat coordinates, including scale) let the phone show the splat

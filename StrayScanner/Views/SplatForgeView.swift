@@ -16,6 +16,8 @@ final class SplatForgeClient: ObservableObject {
     @Published var jobs: [[String: Any]] = []
     @Published var projects: [[String: Any]] = []
     @Published var live: [String: Any] = [:]
+    /// "project/run" → Stray scan folder it was trained from (SplatForge /stray/results).
+    @Published var sourceScans: [String: String] = [:]
     @Published var error: String?
     @Published var lastUpdate: Date?
     private var timer: Timer?
@@ -48,6 +50,15 @@ final class SplatForgeClient: ObservableObject {
         if full || projects.isEmpty {
             get("/api/projects") { [weak self] (json: [[String: Any]]?) in
                 if let json = json { self?.projects = json }
+            }
+            get("/stray/results") { [weak self] (json: [[String: Any]]?) in
+                var map: [String: String] = [:]
+                for item in json ?? [] {
+                    if let project = item["project"] as? String, let run = item["run"] as? String, let scan = item["source_scan"] as? String {
+                        map[URL(fileURLWithPath: project).lastPathComponent + "/" + run] = scan
+                    }
+                }
+                self?.sourceScans = map
             }
         }
     }
@@ -300,7 +311,9 @@ struct SplatForgeView: View {
                             let name = (run["name"] as? String) ?? ""
                             Button {
                                 if let ply = ply {
-                                    viewerSource = .studio(ply: ply, title: "\((project["name"] as? String) ?? "") · \(name)")
+                                    let projectName = (project["name"] as? String) ?? ""
+                                    viewerSource = .studio(ply: ply, title: "\(projectName) · \(name)",
+                                                           sourceScan: client.sourceScans[projectName + "/" + name])
                                 }
                             } label: {
                                 HStack {

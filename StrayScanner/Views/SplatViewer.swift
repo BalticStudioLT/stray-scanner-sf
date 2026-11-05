@@ -17,21 +17,31 @@ import simd
 // MARK: - Data
 
 enum SplatSource: Equatable, Identifiable {
-    case studio(ply: String, title: String)
+    /// `sourceScan`: Stray folder the splat was trained from; SplatForge keeps its ARKit coordinates
+    /// (scan_to_splat = identity), so AR can show the splat exactly where it was scanned.
+    case studio(ply: String, title: String, sourceScan: String?)
     case file(URL)
 
     var id: String {
         switch self {
-        case .studio(let ply, _): return "studio:" + ply
+        case .studio(let ply, _, _): return "studio:" + ply
         case .file(let url): return "file:" + url.absoluteString
         }
     }
 
     var title: String {
         switch self {
-        case .studio(_, let title): return title
+        case .studio(_, let title, _): return title
         case .file(let url): return url.lastPathComponent
         }
+    }
+
+    /// The scan's world map on this phone, if the scan was recorded here and the map was saved.
+    var worldMapURL: URL? {
+        guard case .studio(_, _, let scan?) = self,
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let url = documents.appendingPathComponent(scan).appendingPathComponent(DatasetEncoder.worldMapFileName)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 }
 
@@ -462,9 +472,15 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     /// 1 = real size (walk inside), 0.1 = 1:10 model, …
     var modelScale: Float = 1 { didSet { updateModel() } }
     var onStatus: ((String) -> Void)?
+    /// "In place": relocalize in the scan's world map and draw the splat in its own coordinates.
+    private var inPlaceMap: ARWorldMap?
+    private var relocalized = false
 
-    init(device: MTLDevice, splats: SplatData) {
+    init(device: MTLDevice, splats: SplatData, inPlaceWorldMap: URL? = nil) {
         super.init(frame: .zero, device: device)
+        if let url = inPlaceWorldMap, let data = try? Data(contentsOf: url) {
+            inPlaceMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
+        }
         colorPixelFormat = .bgra8Unorm
         preferredFramesPerSecond = 60
         commandQueue = device.makeCommandQueue()
@@ -499,14 +515,20 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     func start() {
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal]
-        session.run(config)
-        onStatus?("Move the phone a little, then tap the floor to place the scan")
+        if let map = inPlaceMap {
+            config.initialWorldMap = map
+            session.run(config)
+            onStatus?("In place: point the phone at the room you scanned to line up…")
+        } else {
+            session.run(config)
+            onStatus?("Move the phone a little, then tap the floor to place the scan")
+        }
     }
 
     func stop() { session.pause() }
 
     @objc private func tapped(_ g: UITapGestureRecognizer) {
-        guard let frame = session.currentFrame, bounds.width > 0 else { return }
+        guard inPlaceMap == nil, let frame = session.currentFrame, bounds.width > 0 else { return }
         let point = g.location(in: self)
         let normalized = CGPoint(x: point.x / bounds.width, y: point.y / bounds.height)
         let imagePoint = normalized.applying(frame.displayTransform(for: .portrait, viewportSize: bounds.size).inverted())
@@ -522,6 +544,7 @@ final class ARSplatView: MTKView, MTKViewDelegate {
     }
 
     @objc private func rotated(_ g: UIRotationGestureRecognizer) {
+        guard inPlaceMap == nil else { return }
         angle -= Float(g.rotation)
         g.rotation = 0
         updateModel()
@@ -568,9 +591,14 @@ final class ARSplatView: MTKView, MTKViewDelegate {
                 encoder.setFragmentTexture(cbcr, index: 1)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
-            if let renderer = renderer, placement != nil {
+            if inPlaceMap != nil, !relocalized, case .normal = frame.camera.trackingState {
+                relocalized = true
+                DispatchQueue.main.async { self.onStatus?("In place: the scan is drawn where it was recorded") }
+            }
+            let showInPlace = inPlaceMap != nil && relocalized
+            if let renderer = renderer, placement != nil || showInPlace {
                 let size = drawableSize
-                let viewMatrix = frame.camera.viewMatrix(for: .portrait) * model
+                let viewMatrix = frame.camera.viewMatrix(for: .portrait) * (showInPlace ? matrix_identity_float4x4 : model)
                 let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: size, zNear: 0.03, zFar: 200)
                 renderer.draw(encoder, view: viewMatrix, projection: projection, viewport: size)
             }
@@ -596,6 +624,7 @@ struct SplatViewerScreen: View {
     @State private var arMode = false
     @State private var flipped = false
     @State private var scaleIndex = 0
+    @State private var inPlace = false
     private let maxSplats = 1_000_000
     private let scales: [(String, Float)] = [("1:1", 1), ("1:10", 0.1), ("1:50", 0.02)]
 
@@ -605,7 +634,9 @@ struct SplatViewerScreen: View {
                 Color.black.ignoresSafeArea()
                 if let splats = splats {
                     SplatCanvas(splats: splats, arMode: arMode, flipped: flipped,
-                                modelScale: scales[scaleIndex].1, status: $status)
+                                modelScale: scales[scaleIndex].1, inPlaceMap: inPlace ? source.worldMapURL : nil,
+                                status: $status)
+                        .id(inPlace)
                         .ignoresSafeArea()
                 } else {
                     ProgressView(status).tint(.white).foregroundStyle(.white)
@@ -623,7 +654,12 @@ struct SplatViewerScreen: View {
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 110)
-                        if arMode {
+                        if arMode && source.worldMapURL != nil {
+                            Toggle(isOn: $inPlace) { Image(systemName: "location.fill") }
+                                .toggleStyle(.button)
+                                .accessibilityLabel("Show where it was scanned")
+                        }
+                        if arMode && !inPlace {
                             Picker("Size", selection: $scaleIndex) {
                                 ForEach(0..<scales.count, id: \.self) { Text(scales[$0].0).tag($0) }
                             }
@@ -658,7 +694,7 @@ struct SplatViewerScreen: View {
         do {
             let loaded: SplatData
             switch source {
-            case .studio(let ply, _):
+            case .studio(let ply, _, _):
                 loaded = try await SplatLoader.loadFromStudio(ply: ply, maxSplats: maxSplats, device: device) { text in
                     Task { @MainActor in status = text }
                 }
@@ -682,6 +718,7 @@ struct SplatCanvas: UIViewRepresentable {
     let arMode: Bool
     let flipped: Bool
     let modelScale: Float
+    let inPlaceMap: URL?
     @Binding var status: String
 
     final class Container: UIView {
@@ -701,7 +738,7 @@ struct SplatCanvas: UIViewRepresentable {
             container.orbit?.removeFromSuperview()
             container.orbit = nil
             if container.ar == nil {
-                let ar = ARSplatView(device: device, splats: splats)
+                let ar = ARSplatView(device: device, splats: splats, inPlaceWorldMap: inPlaceMap)
                 ar.frame = container.bounds
                 ar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
                 let binding = $status
