@@ -19,9 +19,26 @@ import CoreMotion
 import CoreData
 import CryptoKit
 import SwiftUI
+import ARKit
 
-final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
+final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate, ARSessionDelegate {
     var dismissFunction: (() -> Void)?
+    /// LiDAR scan this pass adds to. The pass is saved in <scan>/passes/uw…/ and anchored to the scan's
+    /// coordinates: ARKit relocalises in the scan's world map before and after the ultra-wide recording.
+    var parentScan: URL?
+
+    private enum Phase { case idle, aligningStart, ready, recording, aligningEnd, finished }
+    private var phase: Phase = .idle
+    private let arSession = ARSession()
+    private let arPreview = MetalPreviewView()
+    private var arRenderer: ScanRenderer?
+    private var normalFrames = 0
+    private var alignStarted = Date()
+    private var anchors: [String: Any] = [:]
+    private var latestAttitude: CMQuaternion?
+    private let altimeter = CMAltimeter()
+    private var motionFile: FileHandle?
+    private var altitudeFile: FileHandle?
 
     private let captureSession = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
@@ -81,7 +98,12 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         UIApplication.shared.isIdleTimerDisabled = true
         AVCaptureDevice.requestAccess(for: .video) { granted in
             DispatchQueue.main.async {
-                if granted { self.configureSession() } else { self.adviceLabel.text = "Camera access is off (Settings ▸ Stray SF)" }
+                guard granted else { self.adviceLabel.text = "Camera access is off (Settings ▸ Stray SF)"; return }
+                if self.parentScan != nil {
+                    self.prepareAnchoredPass()
+                } else {
+                    self.configureSession()
+                }
             }
         }
         uiTimer = Timer.scheduledTimer(timeInterval: 0.25, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
@@ -92,6 +114,8 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         if recording { stopRecording() }
         uiTimer?.invalidate()
         captureQueue.async { self.captureSession.stopRunning() }
+        arSession.pause()
+        altimeter.stopRelativeAltitudeUpdates()
         motion.stopDeviceMotionUpdates()
         motion.stopAccelerometerUpdates()
         motion.stopGyroUpdates()
@@ -214,13 +238,116 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
 
     // MARK: - Recording
 
+    static let motionHeader = "timestamp, qx, qy, qz, qw, rot_x, rot_y, rot_z, gravity_x, gravity_y, gravity_z, user_acc_x, user_acc_y, user_acc_z, mag_x, mag_y, mag_z, mag_accuracy\n"
+
+    // MARK: - Anchoring to the LiDAR scan
+
+    private func prepareAnchoredPass() {
+        guard let folder = makeFolder() else { return }
+        self.folder = folder
+        func open(_ name: String, _ header: String) -> FileHandle? {
+            let url = folder.appendingPathComponent(name)
+            try? header.write(to: url, atomically: true, encoding: .utf8)
+            let handle = try? FileHandle(forWritingTo: url)
+            handle?.seekToEndOfFile()
+            return handle
+        }
+        attitudeFile = open("attitude.csv", "timestamp, qx, qy, qz, qw\n")
+        motionFile = open("motion.csv", UltraWideRecordViewController.motionHeader)
+        altitudeFile = open("altitude.csv", "timestamp, relative_altitude_m, pressure_kpa\n")
+        FileManager.default.createFile(atPath: folder.appendingPathComponent(DatasetEncoder.inProgressMarker).path, contents: nil)
+        anchors["parent_scan"] = parentScan?.lastPathComponent
+        anchors["attitude_reference"] = "CMAttitudeReferenceFrame.xArbitraryCorrectedZVertical (same as attitude.csv / motion.csv)"
+        anchors["pose_convention"] = "arkit_c2w_colmajor: ARKit camera-to-world (camera looks -Z, y up) of the WIDE camera; odometry: x,y,z,qx,qy,qz,qw exactly like odometry.csv (OpenCV camera)"
+        startMotion()   // runs through both ARKit phases and the recording, so attitude links them
+        startAlignment()
+    }
+
+    private func startAlignment() {
+        guard let parent = parentScan,
+              let data = try? Data(contentsOf: parent.appendingPathComponent(DatasetEncoder.worldMapFileName)),
+              let map = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) else {
+            adviceLabel.text = "This scan has no saved room map — recording without anchors"
+            if phase == .aligningEnd, case let (folder, started)? = pendingFinish { finishPass(folder: folder, started: started); dismissFunction?() }
+            else { phase = .ready; configureSession() }
+            return
+        }
+        if phase != .aligningEnd { phase = .aligningStart }
+        normalFrames = 0
+        alignStarted = Date()
+        if arRenderer == nil {
+            arRenderer = ScanRenderer(layer: arPreview.metalLayer)
+            arRenderer?.mode = .camera
+        }
+        arPreview.isHidden = false
+        previewHost.isHidden = true
+        arSession.delegate = self
+        let config = ARWorldTrackingConfiguration()
+        config.initialWorldMap = map
+        arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
+        updateButtons()
+    }
+
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        arRenderer?.render(frame: frame)
+        guard phase == .aligningStart || phase == .aligningEnd else { return }
+        if case .normal = frame.camera.trackingState { normalFrames += 1 } else { normalFrames = 0 }
+        let waited = Date().timeIntervalSince(alignStarted)
+        // Relocalised and stable for ~0.5 s → record the anchor; give up after 25 s.
+        guard normalFrames >= 30 || waited > 25 else { return }
+        let key = phase == .aligningStart ? "start" : "end"
+        if normalFrames >= 30 { anchors[key] = anchorDictionary(frame) } else { anchors[key + "_failed"] = "not relocalised within 25 s" }
+        arSession.pause()
+        arPreview.isHidden = true
+        previewHost.isHidden = false
+        if phase == .aligningStart {
+            phase = .ready
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.configureSession() }
+        } else if case let (folder, started)? = pendingFinish {
+            pendingFinish = nil
+            finishPass(folder: folder, started: started)
+            dismissFunction?()
+        }
+        updateButtons()
+    }
+
+    private func anchorDictionary(_ frame: ARFrame) -> [String: Any] {
+        let m = frame.camera.transform
+        let k = frame.camera.intrinsics
+        let q = (simd_quatf(m) * simd_quatf(ix: 1, iy: 0, iz: 0, r: 0)).vector
+        gyroLock.lock()
+        let att = latestAttitude
+        gyroLock.unlock()
+        var d: [String: Any] = [
+            "t": frame.timestamp,
+            "arkit_c2w_colmajor": [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
+            "odometry": [m.columns.3.x, m.columns.3.y, m.columns.3.z, q.x, q.y, q.z, q.w],
+            "wide_intrinsics": [k.columns.0.x, k.columns.1.y, k.columns.2.x, k.columns.2.y],
+            "wide_image_size": [Int(frame.camera.imageResolution.width), Int(frame.camera.imageResolution.height)],
+        ]
+        if let a = att { d["attitude_q"] = [a.x, a.y, a.z, a.w] }
+        return d
+    }
+
+    /// Factory transform between the wide and ultra-wide cameras (iOS 17+), row-major 4×3 [R | t], metres.
+    private func wideToUltraWideExtrinsics() -> [Float]? {
+        guard #available(iOS 17.0, *), let ultra = device,
+              let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let data = AVCaptureDevice.extrinsicMatrix(from: wide, to: ultra),
+              data.count >= MemoryLayout<matrix_float4x3>.size else { return nil }
+        let m = data.withUnsafeBytes { $0.loadUnaligned(as: matrix_float4x3.self) }
+        return [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z] }
+    }
+
     @objc private func recordTapped() {
         if recording { stopRecording() } else { startRecording() }
     }
 
     private func startRecording() {
-        guard let folder = makeFolder() else { return }
+        if parentScan != nil && phase != .ready { return }
+        guard let folder = self.folder ?? makeFolder() else { return }
         self.folder = folder
+        phase = .recording
         func open(_ name: String, _ header: String) -> FileHandle? {
             let url = folder.appendingPathComponent(name)
             try? header.write(to: url, atomically: true, encoding: .utf8)
@@ -231,7 +358,9 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         exposureFile = open("exposure.csv", "timestamp, frame, exposure_duration_s, exposure_offset, iso, white_balance_r, white_balance_g, white_balance_b\n")
         qualityFile = open("frame_quality.csv", "timestamp, frame, tracking_state, tracking_reason, linear_speed_mps, angular_speed_dps, est_blur_px, median_depth_m, depth_confident_fraction, torch_level\n")
         intrinsicsFile = open("intrinsics.csv", "timestamp, frame, fx, fy, cx, cy\n")
-        attitudeFile = open("attitude.csv", "timestamp, qx, qy, qz, qw\n")
+        if attitudeFile == nil { attitudeFile = open("attitude.csv", "timestamp, qx, qy, qz, qw\n") }
+        if motionFile == nil { motionFile = open("motion.csv", UltraWideRecordViewController.motionHeader) }
+        if altitudeFile == nil { altitudeFile = open("altitude.csv", "timestamp, relative_altitude_m, pressure_kpa\n") }
         imuEncoder = IMUEncoder(url: folder.appendingPathComponent("imu.csv"))
         FileManager.default.createFile(atPath: folder.appendingPathComponent(DatasetEncoder.inProgressMarker).path, contents: nil)
         exposureController.lockForRecording()
@@ -246,7 +375,12 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: folder.appendingPathComponent("capture_settings.json"))
         }
-        startMotion()
+        if parentScan == nil { startMotion() }
+        settings["parent_scan"] = parentScan?.lastPathComponent ?? NSNull()
+        settings["wide_to_ultrawide_extrinsics"] = wideToUltraWideExtrinsics() ?? NSNull()
+        if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: folder.appendingPathComponent("capture_settings.json"))
+        }
         let encoder = VideoEncoder(file: folder.appendingPathComponent("rgb.mp4"), width: videoSize.width, height: videoSize.height, framesPerSecond: videoFPS)
         captureQueue.async {
             self.frameIndex = 0
@@ -263,27 +397,59 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         guard let started = startedAt, let folder = folder else { return }
         startedAt = nil
         recordButton.isRecording = false
-        motion.stopDeviceMotionUpdates()
-        motion.stopAccelerometerUpdates()
         captureQueue.sync {
             self.recording = false
             self.videoEncoder?.finishEncoding()
             self.videoEncoder = nil
         }
+        if parentScan != nil {
+            // Close the pass: back to ARKit to anchor the end pose in the scan's coordinates.
+            phase = .aligningEnd
+            captureQueue.async { self.captureSession.stopRunning() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.startAlignment() }
+            pendingFinish = (folder, started)
+            return
+        }
+        motion.stopDeviceMotionUpdates()
+        motion.stopAccelerometerUpdates()
+        finishPass(folder: folder, started: started)
+    }
+
+    private var pendingFinish: (URL, Date)?
+
+    private func finishPass(folder: URL, started: Date) {
+        motion.stopDeviceMotionUpdates()
+        motion.stopAccelerometerUpdates()
+        motion.stopGyroUpdates()
+        altimeter.stopRelativeAltitudeUpdates()
         writeQueue.sync {
             [exposureFile, qualityFile, intrinsicsFile, attitudeFile].forEach { try? $0?.close() }
         }
         imuEncoder?.done()
         imuEncoder = nil
         exposureController.unlockAfterRecording()
+        writeQueue.sync {
+            try? motionFile?.close()
+            try? altitudeFile?.close()
+        }
+        if !anchors.isEmpty, let data = try? JSONSerialization.data(withJSONObject: anchors, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: folder.appendingPathComponent("anchors.json"))
+        }
         try? FileManager.default.removeItem(at: folder.appendingPathComponent(DatasetEncoder.inProgressMarker))
-        saveRecording(folder: folder, started: started)
-        if PCLinkSettings.load().autoUpload { PCUploader.shared.upload(directory: folder) }
+        phase = .finished
+        if let parent = parentScan {
+            // Part of the parent scan: uploading the scan sends the pass with it.
+            if PCLinkSettings.load().autoUpload { PCUploader.shared.upload(directory: parent) }
+        } else {
+            saveRecording(folder: folder, started: started)
+            if PCLinkSettings.load().autoUpload { PCUploader.shared.upload(directory: folder) }
+        }
         updateButtons()
         dismissFunction?()
     }
 
     private func startMotion() {
+        guard !motion.isGyroActive else { return }
         motionQueue.qualityOfService = .userInitiated
         if motion.isGyroAvailable {
             motion.gyroUpdateInterval = 1.0 / 400.0
@@ -303,22 +469,41 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
             motion.startAccelerometerUpdates()
         }
         if motion.isDeviceMotionAvailable {
+            // Continuous across the ARKit anchors and the ultra-wide recording: attitude (gyro + gravity,
+            // magnetometer-corrected yaw), bias-corrected rotation rate, gravity, user acceleration, magnetic field.
             motion.deviceMotionUpdateInterval = 1.0 / 100.0
-            motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: motionQueue) { data, _ in
+            motion.showsDeviceMovementDisplay = true
+            motion.startDeviceMotionUpdates(using: .xArbitraryCorrectedZVertical, to: motionQueue) { data, _ in
                 guard let data = data else { return }
                 let q = data.attitude.quaternion
-                let line = "\(data.timestamp), \(q.x), \(q.y), \(q.z), \(q.w)\n"
-                self.writeQueue.async { self.attitudeFile?.write(line.data(using: .utf8)!) }
+                self.gyroLock.lock()
+                self.latestAttitude = q
+                self.gyroLock.unlock()
+                let r = data.rotationRate, g = data.gravity, a = data.userAcceleration, m = data.magneticField.field
+                let attitudeLine = "\(data.timestamp), \(q.x), \(q.y), \(q.z), \(q.w)\n"
+                let motionLine = "\(data.timestamp), \(q.x), \(q.y), \(q.z), \(q.w), \(r.x), \(r.y), \(r.z), \(g.x), \(g.y), \(g.z), \(a.x), \(a.y), \(a.z), \(m.x), \(m.y), \(m.z), \(data.magneticField.accuracy.rawValue)\n"
+                self.writeQueue.async {
+                    self.attitudeFile?.write(attitudeLine.data(using: .utf8)!)
+                    self.motionFile?.write(motionLine.data(using: .utf8)!)
+                }
+            }
+        }
+        if CMAltimeter.isRelativeAltitudeAvailable() {
+            altimeter.startRelativeAltitudeUpdates(to: motionQueue) { data, _ in
+                guard let data = data else { return }
+                let line = "\(data.timestamp), \(data.relativeAltitude.doubleValue), \(data.pressure.doubleValue)\n"
+                self.writeQueue.async { self.altitudeFile?.write(line.data(using: .utf8)!) }
             }
         }
     }
 
     private func makeFolder() -> URL? {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let base = parentScan.map { $0.appendingPathComponent("passes", isDirectory: true) } ?? documents
         var hasher = SHA256()
         hasher.update(data: Data(UUID().uuidString.utf8))
         let name = "uw" + hasher.finalize().prefix(4).map { String(format: "%02x", $0) }.joined()
-        let url = documents.appendingPathComponent(name, isDirectory: true)
+        let url = base.appendingPathComponent(name, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             return url
@@ -378,9 +563,11 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
     private func updateButtons() {
         Glass.setTitle(shutterButton, shutter.label)
         Glass.setTitle(formatButton, use4K ? "4K 30" : "1440p 60")
-        shutterButton.isEnabled = !recording && exposureController.isAvailable
-        formatButton.isEnabled = !recording
-        closeButton.isEnabled = !recording
+        let aligning = phase == .aligningStart || phase == .aligningEnd
+        shutterButton.isEnabled = !recording && !aligning && exposureController.isAvailable
+        formatButton.isEnabled = !recording && !aligning
+        closeButton.isEnabled = !recording && phase != .aligningEnd
+        recordButton.isEnabled = !aligning
         previewLayer.videoGravity = .resizeAspect
     }
 
@@ -397,6 +584,13 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         statsLabel.text = String(format: "Ultra-wide %d×%d @ %d · %@ · ISO %.0f\nBlur %.1f px · no LiDAR / no poses (SfM on the PC) · %d frames",
                                  Int(videoSize.width), Int(videoSize.height), videoFPS, shutterText, iso, lastBlur, frameIndex)
         let level: ScanAdvice.Level
+        if phase == .aligningStart || phase == .aligningEnd {
+            adviceLabel.text = phase == .aligningStart
+                ? "Lining up with the LiDAR scan — point at what you scanned"
+                : "Closing the pass — point at the scanned room again"
+            Glass.setTint(advicePanel, UIColor.systemBlue.withAlphaComponent(0.35))
+            return
+        }
         if lastBlur > ScanQualityMonitor.blurBadLimit {
             adviceLabel.text = String(format: "Slow down — blur %.1f px", lastBlur)
             level = .bad
@@ -418,6 +612,9 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         previewLayer.session = captureSession
         previewLayer.videoGravity = .resizeAspect
         view.addSubview(previewHost)
+        arPreview.translatesAutoresizingMaskIntoConstraints = false
+        arPreview.isHidden = true
+        view.addSubview(arPreview)
 
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         closeButton.accessibilityLabel = "Back"
@@ -453,6 +650,10 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
             previewHost.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             previewHost.topAnchor.constraint(equalTo: safe.topAnchor),
             previewHost.heightAnchor.constraint(equalTo: previewHost.widthAnchor, multiplier: 4.0 / 3.0),
+            arPreview.leadingAnchor.constraint(equalTo: previewHost.leadingAnchor),
+            arPreview.trailingAnchor.constraint(equalTo: previewHost.trailingAnchor),
+            arPreview.topAnchor.constraint(equalTo: previewHost.topAnchor),
+            arPreview.bottomAnchor.constraint(equalTo: previewHost.bottomAnchor),
             closeButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             closeButton.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
             closeButton.widthAnchor.constraint(equalToConstant: 44),
@@ -502,9 +703,10 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
 
 struct UltraWideSessionView: View {
     @Environment(\.dismiss) private var dismiss
+    var parentScan: URL? = nil
 
     var body: some View {
-        UltraWideRepresentable(onDone: { dismiss() })
+        UltraWideRepresentable(parentScan: parentScan, onDone: { dismiss() })
             .ignoresSafeArea()
             .toolbar(.hidden, for: .navigationBar)
             .preferredColorScheme(.dark)
@@ -512,10 +714,12 @@ struct UltraWideSessionView: View {
 }
 
 private struct UltraWideRepresentable: UIViewControllerRepresentable {
+    let parentScan: URL?
     let onDone: () -> Void
 
     func makeUIViewController(context: Context) -> UltraWideRecordViewController {
         let controller = UltraWideRecordViewController()
+        controller.parentScan = parentScan
         controller.dismissFunction = onDone
         return controller
     }

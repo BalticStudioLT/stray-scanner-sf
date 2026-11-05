@@ -15,6 +15,7 @@ struct ScanSummary {
     var medianBlur: Double?
     var limitedTrackingFrames: Int = 0
     var markers: Int = 0
+    var ultraWidePasses: Int = 0
     var sizeBytes: Int64 = 0
 
     static func load(directory: URL?) -> ScanSummary {
@@ -44,6 +45,9 @@ struct ScanSummary {
         }
         if let markers = try? String(contentsOf: directory.appendingPathComponent("markers.csv"), encoding: .utf8) {
             summary.markers = max(markers.split(separator: "\n").count - 1, 0)
+        }
+        if let passes = try? fm.contentsOfDirectory(at: directory.appendingPathComponent("passes"), includingPropertiesForKeys: nil) {
+            summary.ultraWidePasses = passes.filter { $0.hasDirectoryPath }.count
         }
         if let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.fileSizeKey]) {
             for case let file as URL in enumerator {
@@ -102,6 +106,9 @@ struct ScanSummaryChips: View {
         }
         if summary.markers > 0 {
             result.append(StatChip(symbol: "mappin.and.ellipse", text: "\(summary.markers)"))
+        }
+        if summary.ultraWidePasses > 0 {
+            result.append(StatChip(symbol: "camera.aperture", text: "+\(summary.ultraWidePasses)× 0.5×", tint: .cyan))
         }
         if summary.sizeBytes > 0 {
             result.append(StatChip(symbol: "internaldrive", text: ByteCountFormatter.string(fromByteCount: summary.sizeBytes, countStyle: .file)))

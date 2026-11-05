@@ -15,3 +15,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-05 01:26 "Flashlight could have lower iso. Because otherwise it will burn out the view. So in beginning there should be calibration"
 - 2026-11-05 01:37 [screenshot, Points view with camera+LiDAR+minimap insets, coverage colours] "When everything is on it becomes crowded"
 - 2026-11-05 01:39 "Make view more modern, clicking some view swaps it with big screen"
+- 2026-11-05 10:10 "maybe 0.5 should be like add more information to scan? after i finished with lidar. also it should capture gyro and all data to help as much as possible with alignment"
+- 2026-11-05 10:11 "and connection says wrong studio token"

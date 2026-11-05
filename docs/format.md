@@ -158,3 +158,23 @@ are missing; align these frames with SfM, or register them to a LiDAR scan of th
 
 All timestamps are seconds of system uptime, the same clock as CoreMotion, so gyro samples can be matched to frames
 (e.g. for a motion-blur or rolling-shutter model).
+
+### 0.5× pass anchored to a LiDAR scan (`<scan>/passes/uw…/`)
+
+Open a LiDAR scan and tap **Add 0.5× pass**. The pass is saved *inside* the scan, so sending the scan to the PC sends
+the pass with it. Flow: ARKit relocalises in the scan's saved room map (`worldmap.arexperience`) → **start anchor** →
+ultra-wide recording → back to ARKit → **end anchor**. CoreMotion runs without a break through all three phases, so the
+gyro/attitude stream links each ultra-wide frame to the two ARKit poses in the scan's own coordinates.
+
+Extra files in a pass (besides the ultra-wide files above):
+
+| File | Content |
+|---|---|
+| `anchors.json` | `start`, `end` (or `start_failed`/`end_failed`): `t` (uptime s), `arkit_c2w_colmajor` (16 floats, ARKit camera-to-world of the **wide** camera, scan coordinates), `odometry` (`x,y,z,qx,qy,qz,qw`, same convention as `odometry.csv`), `wide_intrinsics` (`fx,fy,cx,cy`), `wide_image_size`, `attitude_q` (CoreMotion attitude at that moment); plus `parent_scan`, `attitude_reference`, `pose_convention` |
+| `motion.csv` | `timestamp, qx, qy, qz, qw, rot_x, rot_y, rot_z, gravity_x, gravity_y, gravity_z, user_acc_x, user_acc_y, user_acc_z, mag_x, mag_y, mag_z, mag_accuracy` — CoreMotion device motion at 100 Hz, reference `xArbitraryCorrectedZVertical` (magnetometer-corrected yaw), bias-corrected rotation rate (rad/s), gravity and user acceleration (g), calibrated magnetic field (µT) |
+| `altitude.csv` | `timestamp, relative_altitude_m, pressure_kpa` (barometer; height changes of a few cm–dm) |
+
+`capture_settings.json` of a pass also has `parent_scan` and `wide_to_ultrawide_extrinsics` (iOS 17+: factory 4×3
+`[R | t]` from the wide to the ultra-wide camera, metres; `null` if unavailable). Suggested alignment: pose_uw(t) =
+anchor pose × attitude(anchor)⁻¹ × attitude(t) × extrinsics, used as an initial guess for SfM / registration against the
+LiDAR splat; the start and end anchors bound gyro drift.

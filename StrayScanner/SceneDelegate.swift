@@ -32,6 +32,17 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             self.window = window
             window.makeKeyAndVisible()
         }
+        if let url = connectionOptions.urlContexts.first?.url { PCLinkSettings.pair(with: url) }
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        guard let url = URLContexts.first?.url else { return }
+        let ok = PCLinkSettings.pair(with: url)
+        let alert = UIAlertController(title: ok ? "Paired with SplatForge" : "Pairing link had no token",
+                                      message: ok ? "Host \(PCLinkSettings.load().host), token saved." : url.absoluteString,
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        window?.rootViewController?.present(alert, animated: true)
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {

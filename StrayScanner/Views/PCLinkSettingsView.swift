@@ -28,11 +28,24 @@ struct PCLinkSettingsView: View {
                         .keyboardType(.URL)
                     TextField("Port", text: $port)
                         .keyboardType(.numberPad)
-                    SecureField("Studio token (A:\\AI\\SplatForge\\.studio_token)", text: $token)
+                    TextField("Studio token (A:\\AI\\SplatForge\\.studio_token)", text: $token)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.footnote, design: .monospaced))
+                    Button {
+                        if let text = UIPasteboard.general.string, let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+                           PCLinkSettings.pair(with: url) {
+                            load()
+                        } else if let text = UIPasteboard.general.string {
+                            token = PCLinkSettings.cleanToken(text)
+                        }
+                    } label: {
+                        Label("Paste Studio link or token", systemImage: "doc.on.clipboard")
+                    }
                 } header: {
                     Text("SplatForge PC")
                 } footer: {
-                    Text("Install Tailscale on the iPhone and the PC and sign in to the same account. Use the PC's Tailscale name or 100.x address. Start SplatForge Studio on the PC (port 8777). Status and Studio work right away; Send to PC and the live link need the phone receiver in SplatForge (docs/pc-link.md).")
+                    Text("Install Tailscale on the iPhone and the PC and sign in to the same account. Use the PC's Tailscale name or 100.x address. Start SplatForge Studio on the PC (port 8777). Token: open the Studio link from the PC (it ends in ?t=…) and paste it here, or scan the Studio’s “Pair phone” QR code. Status and Studio work right away; Send to PC and the live link need the phone receiver in SplatForge (docs/pc-link.md).")
                 }
                 Section {
                     Button {

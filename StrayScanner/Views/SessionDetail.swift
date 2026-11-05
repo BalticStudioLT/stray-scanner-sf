@@ -128,6 +128,10 @@ struct SessionDetailView: View {
                         Label("Continue", systemImage: "arrow.triangle.2.circlepath")
                     }
                     .glassButton()
+                    NavigationLink(destination: UltraWideSessionView(parentScan: folder)) {
+                        Label("Add 0.5× pass", systemImage: "camera.aperture")
+                    }
+                    .glassButton()
                 }
 
                 Button(role: .destructive, action: deleteItem) {

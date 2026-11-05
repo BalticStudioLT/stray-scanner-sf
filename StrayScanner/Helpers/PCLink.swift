@@ -36,7 +36,7 @@ struct PCLinkSettings {
         let port = d.integer(forKey: portKey)
         return PCLinkSettings(host: d.string(forKey: hostKey) ?? "coolmaster4",
                               port: port > 0 ? port : 8777,
-                              token: d.string(forKey: tokenKey) ?? "",
+                              token: cleanToken(d.string(forKey: tokenKey) ?? ""),
                               autoUpload: d.bool(forKey: autoUploadKey),
                               live: d.bool(forKey: liveKey))
     }
@@ -45,10 +45,46 @@ struct PCLinkSettings {
         let d = UserDefaults.standard
         d.set(host.trimmingCharacters(in: .whitespaces), forKey: PCLinkSettings.hostKey)
         d.set(port, forKey: PCLinkSettings.portKey)
-        d.set(token, forKey: PCLinkSettings.tokenKey)
+        d.set(PCLinkSettings.cleanToken(token), forKey: PCLinkSettings.tokenKey)
         d.set(autoUpload, forKey: PCLinkSettings.autoUploadKey)
         d.set(live, forKey: PCLinkSettings.liveKey)
     }
+
+    /// Tokens pasted from a file or a URL often carry spaces, newlines or a "t=" prefix — the server then says "wrong token".
+    static func cleanToken(_ raw: String) -> String {
+        var t = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'")))
+        if t.contains("t=") {
+            let query = t.contains("?") ? t : "http://x/?" + t
+            if let comps = URLComponents(string: query),
+               let v = comps.queryItems?.first(where: { $0.name == "t" || $0.name == "token" })?.value {
+                t = v
+            }
+        }
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// straysf://pair?host=coolmaster4&port=8777&t=TOKEN — or a Studio URL like http://coolmaster4:8777/?t=TOKEN.
+    /// Returns true when the link carried a token and settings were saved.
+    @discardableResult
+    static func pair(with url: URL) -> Bool {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        let items = comps.queryItems ?? []
+        func item(_ n: String) -> String? { items.first(where: { $0.name == n })?.value }
+        guard let token = item("t") ?? item("token"), !token.isEmpty else { return false }
+        var s = PCLinkSettings.load()
+        if url.scheme == "straysf" {
+            if let h = item("host"), !h.isEmpty { s.host = h }
+            if let p = item("port").flatMap(Int.init) { s.port = p }
+        } else {
+            if let h = comps.host, !h.isEmpty { s.host = h }
+            if let p = comps.port { s.port = p }
+        }
+        s.token = cleanToken(token)
+        s.save()
+        NotificationCenter.default.post(name: PCLinkSettings.pairedNotification, object: nil)
+        return true
+    }
+    static let pairedNotification = Notification.Name("PCLinkPaired")
 
     var isConfigured: Bool { return !host.trimmingCharacters(in: .whitespaces).isEmpty }
 
