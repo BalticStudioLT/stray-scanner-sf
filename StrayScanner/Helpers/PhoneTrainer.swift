@@ -205,7 +205,7 @@ final class PhoneTrainer: ObservableObject {
             step += 1
             // Learning rates decay to 30 % over the run.
             let decay = 1 - 0.7 * Float(it) / Float(max(iterations, 1))
-            var a = AdamUniforms(lrColor: 0.01 * decay, lrOpacity: 0.05 * decay, lrScale: 0.01 * decay,
+            var a = AdamUniforms(lrColor: 0.01 * decay, lrOpacity: 0.05 * decay, lrScale: 0.003 * decay,
                                  beta1: 0.9, beta2: 0.999, eps: 1e-8,
                                  bias1: 1 - pow(0.9, step), bias2: 1 - pow(0.999, step), count: UInt32(n))
             if let enc = cb.makeComputeCommandEncoder() {

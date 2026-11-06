@@ -717,7 +717,11 @@ fragment BackOut gsBackward(GSOut in [[stage_in]],
     out.front = frontIn;
     if (alpha < 1.0 / 255.0 || Tin < 1e-4) return out;
     uint2 p = uint2(in.position.xy);
-    float3 finalC = rendered.read(p).rgb;
+    float4 finalRGBA = rendered.read(p);
+    // Only pixels the LiDAR splats actually cover teach anything: in empty pixels (sky, far away, no depth) the
+    // error would only make nearby splats grow into huge blobs to fill the gap.
+    if (finalRGBA.a < 0.5) return out;
+    float3 finalC = finalRGBA.rgb;
     float3 I = target.read(p).rgb;
     float3 g = sign(finalC - I) * tu.gradScale;               // dL/dC for L1
     float3 c = float3(in.color.rgb);
@@ -767,7 +771,7 @@ kernel void trainAdam(uint i [[thread_position_in_grid]],
     TrainParams p = params[i];
     p.rgb = saturate(p.rgb - float3(step[0], step[1], step[2]));
     p.opacityLogit = clamp(p.opacityLogit - step[3], -9.0, 9.0);
-    p.logScale = clamp(p.logScale - step[4], -9.0, -0.5);
+    p.logScale = clamp(p.logScale - step[4], -7.0, -3.2);   // σ 1 mm … 4 cm: splats sit on 1.5 cm LiDAR voxels
     params[i] = p;
 }
 

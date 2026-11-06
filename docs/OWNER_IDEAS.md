@@ -53,3 +53,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-06 00:32 "Maybe it has some amazing ways on saving memory and processing power to render faster and better" (ask SplatForge)
 - 2026-11-06 00:36 (screenshot: viewer shows only sky colour, no splats) "Now i see only sky"
 - 2026-11-06 00:46 "Splatforge responded"
+- 2026-11-06 07:33 (screenshot: phone training result = blurry giant blobs) "Tried render, its terrible. Just a mess of blobs"
