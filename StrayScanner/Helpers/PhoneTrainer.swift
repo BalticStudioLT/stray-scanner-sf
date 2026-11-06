@@ -25,6 +25,11 @@ struct TrainParams {
     var position: SIMD3<Float>
 }
 
+private struct TrainUniforms {
+    var gain: SIMD4<Float>
+    var gradScale: Float
+}
+
 private struct AdamUniforms {
     var lrColor: Float, lrOpacity: Float, lrScale: Float
     var beta1: Float, beta2: Float, eps: Float
@@ -47,6 +52,7 @@ final class PhoneTrainer: ObservableObject {
 
     private struct Keyframe {
         let texture: MTLTexture
+        let mask: MTLTexture?
         let view: simd_float4x4          // ARKit world → camera
         let intrinsics: SIMD4<Float>     // fx, fy, cx, cy at training resolution
     }
@@ -83,7 +89,7 @@ final class PhoneTrainer: ObservableObject {
         publish(.loading("Reading the scan…"))
         let scan = try ScanData(folder: folder)
         publish(.loading("Picking sharp frames…"))
-        let picks = scan.pickKeyframes(max: 120)
+        let picks = scan.pickKeyframes(max: 150)
         guard picks.count >= 8 else { throw TrainError("Not enough sharp frames with poses") }
         let width = 480, height = Int((480 * scan.videoHeight / scan.videoWidth).rounded())
         publish(.loading("Decoding \(picks.count) frames…"))
@@ -145,16 +151,28 @@ final class PhoneTrainer: ObservableObject {
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
-        guard let rendered = target(.rgba16Float), let transmittance = target(.r32Float), let front = target(.rgba32Float) else {
+        guard let rendered = target(.rgba16Float), let transmittance = target(.r32Float), let front = target(.rgba32Float),
+              let gainGrad = device.makeBuffer(length: 16, options: .storageModeShared),
+              let gainKernel = library.makeFunction(name: "trainGainGrad").flatMap({ try? device.makeComputePipelineState(function: $0) })
+        else {
             throw TrainError("Not enough GPU memory")
         }
+        let noMask: MTLTexture? = {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
+            return device.makeTexture(descriptor: d)
+        }()
+        // Per-frame exposure / colour gain (SplatForge: the biggest single error source on phone footage).
+        var gains = [SIMD3<Float>](repeating: SIMD3(1, 1, 1), count: keyframes.count)
 
         var step: Float = 0
         for it in 0..<iterations {
             if stopRequested { break }
             if ProcessInfo.processInfo.thermalState == .serious { Thread.sleep(forTimeInterval: 0.03) }
             if ProcessInfo.processInfo.thermalState == .critical { Thread.sleep(forTimeInterval: 0.3) }
-            let kf = keyframes[Int.random(in: 0..<keyframes.count)]
+            let kfIndex = Int.random(in: 0..<keyframes.count)
+            let kf = keyframes[kfIndex]
+            let learnGain = it > iterations / 3
+            memset(gainGrad.contents(), 0, 16)
             let projection = PhoneTrainer.projection(kf.intrinsics, width: Float(width), height: Float(height))
 
             // 1) parameters → render buffer (committed before the renderer's own sort command buffer).
@@ -187,7 +205,7 @@ final class PhoneTrainer: ObservableObject {
                     var u = GSUniforms(view: kf.view, projection: projection,
                                        viewport: SIMD2<Float>(Float(width), Float(height)),
                                        focal: SIMD2<Float>(kf.intrinsics.x, kf.intrinsics.y))
-                    var tu: Float = 1
+                    var tu = TrainUniforms(gain: SIMD4<Float>(gains[kfIndex], 1), gradScale: 1)
                     enc.setRenderPipelineState(backward)
                     enc.setVertexBuffer(renderBuffer, offset: 0, index: 0)
                     enc.setVertexBuffer(sorted.order, offset: 0, index: 1)
@@ -196,16 +214,28 @@ final class PhoneTrainer: ObservableObject {
                     enc.setVertexBuffer(sorted.args, offset: 0, index: 4)
                     enc.setFragmentTexture(rendered, index: 0)
                     enc.setFragmentTexture(kf.texture, index: 1)
+                    enc.setFragmentTexture(kf.mask ?? noMask, index: 2)
                     enc.setFragmentBuffer(grads, offset: 0, index: 0)
-                    enc.setFragmentBytes(&tu, length: 4, index: 1)
+                    enc.setFragmentBytes(&tu, length: MemoryLayout<TrainUniforms>.stride, index: 1)
                     enc.drawPrimitives(type: .triangleStrip, indirectBuffer: sorted.args, indirectBufferOffset: 0)
                     enc.endEncoding()
                 }
             }
+            if learnGain, let enc = cb.makeComputeCommandEncoder() {
+                var tu = TrainUniforms(gain: SIMD4<Float>(gains[kfIndex], 1), gradScale: 1)
+                enc.setComputePipelineState(gainKernel)
+                enc.setTexture(rendered, index: 0)
+                enc.setTexture(kf.texture, index: 1)
+                enc.setTexture(kf.mask ?? noMask, index: 2)
+                enc.setBuffer(gainGrad, offset: 0, index: 0)
+                enc.setBytes(&tu, length: MemoryLayout<TrainUniforms>.stride, index: 1)
+                enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                enc.endEncoding()
+            }
             step += 1
             // Learning rates decay to 30 % over the run.
             let decay = 1 - 0.7 * Float(it) / Float(max(iterations, 1))
-            var a = AdamUniforms(lrColor: 0.01 * decay, lrOpacity: 0.05 * decay, lrScale: 0.003 * decay,
+            var a = AdamUniforms(lrColor: 0.01 * decay, lrOpacity: 0.05 * decay, lrScale: 0.005 * decay,
                                  beta1: 0.9, beta2: 0.999, eps: 1e-8,
                                  bias1: 1 - pow(0.9, step), bias2: 1 - pow(0.999, step), count: UInt32(n))
             if let enc = cb.makeComputeCommandEncoder() {
@@ -220,6 +250,15 @@ final class PhoneTrainer: ObservableObject {
             }
             cb.commit()
             cb.waitUntilCompleted()
+            if learnGain {
+                let g = gainGrad.contents().bindMemory(to: Float.self, capacity: 4)
+                if g[3] > 100 {
+                    let mean = SIMD3<Float>(g[0], g[1], g[2]) / g[3]
+                    // Small step on the mean sign error, gently pulled back to 1 (tiny L2).
+                    gains[kfIndex] = simd_clamp(gains[kfIndex] - 0.02 * mean + 0.002 * (SIMD3(1, 1, 1) - gains[kfIndex]),
+                                                SIMD3(repeating: 0.5), SIMD3(repeating: 2))
+                }
+            }
             if it % 25 == 0 { DispatchQueue.main.async { self.iteration = it } }
         }
         if let cb = queue.makeCommandBuffer() { encodeBuild(cb); cb.commit(); cb.waitUntilCompleted() }
@@ -253,7 +292,10 @@ final class PhoneTrainer: ObservableObject {
                   image.width == width, image.height == height,
                   let texture = try? loader.newTexture(cgImage: image, options: [.SRGB: false, .textureStorageMode: MTLStorageMode.private.rawValue])
             else { continue }
-            keyframes.append(Keyframe(texture: texture, view: pose.arkitCameraToWorld.inverse,
+            let maskURL = folder.appendingPathComponent("masks").appendingPathComponent(String(format: "%06d.png", pose.frame))
+            let mask = FileManager.default.fileExists(atPath: maskURL.path)
+                ? try? loader.newTexture(URL: maskURL, options: [.SRGB: false, .textureStorageMode: MTLStorageMode.private.rawValue]) : nil
+            keyframes.append(Keyframe(texture: texture, mask: mask, view: pose.arkitCameraToWorld.inverse,
                                       intrinsics: SIMD4(pose.intrinsics.x * sx, pose.intrinsics.y * sy,
                                                         pose.intrinsics.z * sx, pose.intrinsics.w * sy)))
             images[pose.frame] = image
@@ -290,10 +332,33 @@ final class PhoneTrainer: ObservableObject {
                     let py = min(Int(Float(v) / Float(depth.height) * Float(height)), height - 1)
                     let o = (py * width + px) * 4
                     let rgb = SIMD3<Float>(Float(pixels[o]), Float(pixels[o + 1]), Float(pixels[o + 2])) / 255
-                    out.append(TrainParams(rgb: rgb, opacityLogit: 1.4, logScale: log(voxel * 0.7 * max(d / 1.5, 0.6)), position: p))
-                    if out.count >= 400_000 { return out }
+                    out.append(TrainParams(rgb: rgb, opacityLogit: -2.2, logScale: log(voxel), position: p))
+                    if out.count >= 400_000 { return PhoneTrainer.nnScales(out, voxel: voxel) }
                 }
             }
+        }
+        return PhoneTrainer.nnScales(out, voxel: voxel)
+    }
+
+    /// Scale = 0.6 × mean distance to the 3 nearest splats (SplatForge's init; voxel size alone was too coarse).
+    static func nnScales(_ input: [TrainParams], voxel: Float) -> [TrainParams] {
+        var out = input
+        var grid: [SIMD3<Int32>: [Int32]] = [:]
+        for (i, p) in input.enumerated() {
+            grid[SIMD3<Int32>(Int32(floor(p.position.x / voxel)), Int32(floor(p.position.y / voxel)), Int32(floor(p.position.z / voxel))), default: []].append(Int32(i))
+        }
+        for (i, p) in input.enumerated() {
+            let c = SIMD3<Int32>(Int32(floor(p.position.x / voxel)), Int32(floor(p.position.y / voxel)), Int32(floor(p.position.z / voxel)))
+            var best: [Float] = [.infinity, .infinity, .infinity]
+            for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
+                for j in grid[c &+ SIMD3<Int32>(Int32(dx), Int32(dy), Int32(dz))] ?? [] where Int(j) != i {
+                    let d = simd_distance(p.position, input[Int(j)].position)
+                    if d < best[2] { best[2] = d; best.sort() }
+                }
+            }}}
+            let found = best.filter { $0.isFinite }
+            let mean = found.isEmpty ? voxel * 1.5 : found.reduce(0, +) / Float(found.count)
+            out[i].logScale = log(min(max(0.6 * mean, 0.002), 0.04))
         }
         return out
     }
@@ -370,6 +435,7 @@ struct ScanData {
     }
     let poses: [Pose]
     let blur: [Int: Float]
+    let personFraction: [Int: Float]
     let videoWidth: Float, videoHeight: Float, fps: Double, frameOffset: Int
 
     init(folder: URL) throws {
@@ -393,6 +459,17 @@ struct ScanData {
             }
         }
         self.blur = blur
+        var person: [Int: Float] = [:]
+        if let m = try? String(contentsOf: folder.appendingPathComponent("masks.csv"), encoding: .utf8) {
+            var checked: [(Int, Float)] = []
+            for line in m.split(separator: "\n").dropFirst() {
+                let f = line.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                if f.count > 2, let frame = Int(f[0]), let pf = Float(f[2]) { checked.append((frame, pf)) }
+            }
+            // Masks are checked ~5×/s: spread each value to the frames around it (±6).
+            for (frame, pf) in checked where pf > 0 { for f in (frame - 6)...(frame + 6) { person[f] = max(person[f] ?? 0, pf) } }
+        }
+        self.personFraction = person
         var w: Float = 1920, h: Float = 1440, fps = 60.0, offset = 1
         if let data = try? Data(contentsOf: folder.appendingPathComponent("capture_settings.json")),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -404,9 +481,9 @@ struct ScanData {
         videoWidth = w; videoHeight = h; self.fps = fps; frameOffset = offset
     }
 
-    /// Sharpest frames, spread over the whole scan.
+    /// Sharpest frames, spread over the whole scan (frames that are mostly a person are skipped).
     func pickKeyframes(max count: Int) -> [Pose] {
-        let sharp = poses.filter { (blur[$0.frame] ?? 0) <= 1.5 }
+        let sharp = poses.filter { (blur[$0.frame] ?? 0) <= 1.5 && (personFraction[$0.frame] ?? 0) <= 0.3 }
         let pool = sharp.count >= count / 2 ? sharp : poses
         guard pool.count > count else { return pool }
         return (0..<count).map { pool[$0 * pool.count / count] }

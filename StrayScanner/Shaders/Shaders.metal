@@ -699,6 +699,7 @@ struct BackOut {
 };
 
 struct TrainUniforms {
+    float4 gain;        // per-frame exposure/colour gain (rgb), learnt: the phone's auto-exposure differs per frame
     float gradScale;
 };
 
@@ -707,6 +708,7 @@ fragment BackOut gsBackward(GSOut in [[stage_in]],
                             float4 frontIn [[color(1)]],
                             texture2d<float, access::read> rendered [[ texture(0) ]],
                             texture2d<float, access::read> target [[ texture(1) ]],
+                            texture2d<float, access::read> mask [[ texture(2) ]],
                             device atomic_float* grads [[ buffer(0) ]],
                             constant TrainUniforms& tu [[ buffer(1) ]]) {
     float r2 = dot(in.local, in.local);
@@ -721,9 +723,13 @@ fragment BackOut gsBackward(GSOut in [[stage_in]],
     // Only pixels the LiDAR splats actually cover teach anything: in empty pixels (sky, far away, no depth) the
     // error would only make nearby splats grow into huge blobs to fill the gap.
     if (finalRGBA.a < 0.5) return out;
+    // Person / moving object (phone masks): not part of the scene.
+    uint2 mp = uint2(float2(p) * float2(mask.get_width(), mask.get_height()) / float2(rendered.get_width(), rendered.get_height()));
+    if (mask.get_width() > 1 && mask.read(min(mp, uint2(mask.get_width() - 1, mask.get_height() - 1))).r > 0.5) return out;
     float3 finalC = finalRGBA.rgb;
     float3 I = target.read(p).rgb;
-    float3 g = sign(finalC - I) * tu.gradScale;               // dL/dC for L1
+    float3 gain = tu.gain.rgb;
+    float3 g = sign(gain * finalC - I) * gain * tu.gradScale;  // dL/dC for L1 on gain·C
     float3 c = float3(in.color.rgb);
     float T = Tin;
     float3 behind = (finalC - frontIn.rgb - T * alpha * c) / max(T * (1.0 - alpha), 1e-4);
@@ -790,4 +796,24 @@ kernel void trainBuild(uint i [[thread_position_in_grid]],
     float o = 1.0 / (1.0 + exp(-p.opacityLogit));
     s.color = uchar4(uchar3(saturate(p.rgb) * 255.0 + 0.5), uchar(saturate(o) * 255.0 + 0.5));
     splats[i] = s;
+}
+
+
+/// Exposure gain gradient for the current frame: Σ sign(gain·C − I)·C over covered, unmasked pixels (+ count).
+kernel void trainGainGrad(uint2 p [[thread_position_in_grid]],
+                          texture2d<float, access::read> rendered [[ texture(0) ]],
+                          texture2d<float, access::read> target [[ texture(1) ]],
+                          texture2d<float, access::read> mask [[ texture(2) ]],
+                          device atomic_float* out [[ buffer(0) ]],
+                          constant TrainUniforms& tu [[ buffer(1) ]]) {
+    if (p.x >= rendered.get_width() || p.y >= rendered.get_height()) return;
+    float4 c = rendered.read(p);
+    if (c.a < 0.5) return;
+    uint2 mp = uint2(float2(p) * float2(mask.get_width(), mask.get_height()) / float2(rendered.get_width(), rendered.get_height()));
+    if (mask.get_width() > 1 && mask.read(min(mp, uint2(mask.get_width() - 1, mask.get_height() - 1))).r > 0.5) return;
+    float3 s = sign(tu.gain.rgb * c.rgb - target.read(p).rgb) * c.rgb;
+    atomic_fetch_add_explicit(out + 0, s.x, memory_order_relaxed);
+    atomic_fetch_add_explicit(out + 1, s.y, memory_order_relaxed);
+    atomic_fetch_add_explicit(out + 2, s.z, memory_order_relaxed);
+    atomic_fetch_add_explicit(out + 3, 1.0, memory_order_relaxed);
 }
