@@ -54,3 +54,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-06 00:36 (screenshot: viewer shows only sky colour, no splats) "Now i see only sky"
 - 2026-11-06 00:46 "Splatforge responded"
 - 2026-11-06 07:33 (screenshot: phone training result = blurry giant blobs) "Tried render, its terrible. Just a mess of blobs"
+- 2026-11-11 19:50 "update app based on all last things. check fable, opus etc." → LOD v4 (merged L0, pick rule, L2 delta), start_view, footprint cull + clamped Jacobian, disk cache

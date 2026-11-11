@@ -81,3 +81,9 @@ tractor and kitchen; normal mode stays default.
 ## Already done 2026-11-05 (tested on the phone by the owner)
 Full GPU sort ("much better"), per-splat covariance encoding, best-first + pruned splats (opt=1), SH1 colour, level from
 PC up vector, new viewer UI, full-screen recorder, unique small views, GPU point cloud while scanning.
+
+## 2026-11-11 — SplatForge LOD v4 + review #6
+- [x] LOD index v3/v4: `cell_m` level pick (≤ `pick_px` px, `hysteresis` going coarser), L2 as delta over L1 (L1 covariances ÷ growth²), ≤4 chunk requests in flight, chunk files cached on disk per index.
+- [x] `start_view`: 3D view opens at the PC's camera with its vertical FOV; double-tap returns there; `i2s_` (one-photo) splats orbit only ±45°.
+- [x] Clamped Jacobian + footprint culling (big splats at the screen edge no longer pop or smear).
+- Test: open a large LOD scene twice (second open instant from cache); walk close → L2 appears without double-bright splats; edge of screen while orbiting has no popping.

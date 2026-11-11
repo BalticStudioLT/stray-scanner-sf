@@ -267,15 +267,19 @@ static GSProjected gsProjectSplat(uint index, const device GSplat* splats, const
     r.d = d;
     if (d < 0.02) return r;
     float4 clip = u.projection * t;
-    if (abs(clip.x) > 1.3 * clip.w || abs(clip.y) > 1.3 * clip.w) return r;
+    // Loose centre test only; the real cull below uses the whole footprint (big splats just off screen still show).
+    if (abs(clip.x) > 4.0 * clip.w || abs(clip.y) > 4.0 * clip.w) return r;
     float3x3 W = float3x3(u.view[0].xyz, u.view[1].xyz, u.view[2].xyz);
     float3x3 S = float3x3(float3(s.cov[0], s.cov[1], s.cov[2]),
                           float3(s.cov[1], s.cov[3], s.cov[4]),
                           float3(s.cov[2], s.cov[4], s.cov[5])) * s.covScale;
     float3x3 C = W * S * transpose(W);
     // Jacobian of the perspective projection (pixels per view-space unit), y up like NDC.
-    float3 j0 = float3(u.focal.x / d, 0.0, u.focal.x * t.x / (d * d));
-    float3 j1 = float3(0.0, u.focal.y / d, u.focal.y * t.y / (d * d));
+    // Clamped like the reference rasteriser: off-screen splats get the Jacobian of the screen edge (no stretched smears).
+    float limx = 1.3 * 0.5 * u.viewport.x / u.focal.x, limy = 1.3 * 0.5 * u.viewport.y / u.focal.y;
+    float tx = clamp(t.x / d, -limx, limx) * d, ty = clamp(t.y / d, -limy, limy) * d;
+    float3 j0 = float3(u.focal.x / d, 0.0, u.focal.x * tx / (d * d));
+    float3 j1 = float3(0.0, u.focal.y / d, u.focal.y * ty / (d * d));
     float a = dot(j0, C * j0) + 0.3;
     float b = dot(j0, C * j1);
     float c = dot(j1, C * j1) + 0.3;
@@ -294,6 +298,9 @@ static GSProjected gsProjectSplat(uint index, const device GSplat* splats, const
     // Splats right in front of the lens blow up into screen-sized smears: skip anything wider than ~the screen,
     // and fade splats closer than 15 cm.
     if (r1 > 0.8 * max(u.viewport.x, u.viewport.y) || r1 < 0.3) return r;
+    // Footprint cull: drop only when the whole ellipse is off screen.
+    float2 centre = clip.xy / clip.w * 0.5 * u.viewport;
+    if (abs(centre.x) - r1 > 0.5 * u.viewport.x || abs(centre.y) - r1 > 0.5 * u.viewport.y) return r;
     if (d < 0.15) { r.color.a *= half(saturate((d - 0.02) / 0.13)); }
     r.valid = true;
     r.clip = clip;
@@ -404,7 +411,9 @@ kernel void gsKeys(uint i [[thread_position_in_grid]],
     float4 t = u.view * float4(float3(splats[i].position), 1.0);
     float d = -t.z;
     uint key = GS_CULLED;
-    bool visible = d >= 0.02 && abs(t.x) <= d * u.tanX + 0.5 && abs(t.y) <= d * u.tanY + 0.5;
+    // Cheap pre-cull with the splat's own 3σ radius as margin; gsProjectSplat then culls on the exact footprint.
+    float rad = 3.0 * sqrt(max(max(float(splats[i].cov[0]), float(splats[i].cov[3])), float(splats[i].cov[5])) * splats[i].covScale);
+    bool visible = d >= 0.02 && abs(t.x) <= d * u.tanX + rad + 0.05 && abs(t.y) <= d * u.tanY + rad + 0.05;
     if (visible && u.lodFactor > 0.0) {
         // Distance LOD: far splats that cover only a sliver of a pixel are skipped (σ_screen = σ·focal/d).
         GSplat s = splats[i];

@@ -90,6 +90,18 @@ final class SplatLOD {
         let min: SIMD3<Float>
         let max: SIMD3<Float>
         let levelSplats: [Int]
+        /// v3+: median splat size per level (m) and scale growth; L2 can be fetched as a delta over L1.
+        var cellM: [Float] = []
+        var growth: [Float] = []
+        var deltaOver: Int? = nil
+    }
+
+    /// Camera to open at (OpenCV camera in the PLY frame: forward = +z, up = −y), when the PC knows it.
+    struct StartView {
+        let eye: SIMD3<Float>
+        let forward: SIMD3<Float>
+        let up: SIMD3<Float>
+        let fovY: Float
     }
 
     let ply: String
@@ -98,6 +110,11 @@ final class SplatLOD {
     private(set) var chunks: [Chunk] = []
     private(set) var up: SIMD3<Float>?
     private(set) var hasSH = false
+    private(set) var startView: StartView?
+    private(set) var version = 1
+    private var pickPx: Float = 1.5
+    private var hysteresis: Float = 1.3
+    private var cacheDir: URL?
     let budget: Int
 
     // Main-thread state.
@@ -134,11 +151,32 @@ final class SplatLOD {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let list = json["chunks"] as? [[String: Any]], !list.isEmpty else { return nil }
         if let u = json["up"] as? [Double], u.count == 3 { up = SIMD3(Float(u[0]), Float(u[1]), Float(u[2])) }
+        version = (json["version"] as? Int) ?? 1
+        pickPx = Float((json["pick_px"] as? Double) ?? 1.5)
+        hysteresis = Float((json["hysteresis"] as? Double) ?? 1.3)
+        if let sv = json["start_view"] as? [String: Any], let e = sv["eye"] as? [Double], let f = sv["forward"] as? [Double],
+           let u = sv["up"] as? [Double], e.count == 3, f.count == 3, u.count == 3 {
+            startView = StartView(eye: SIMD3(Float(e[0]), Float(e[1]), Float(e[2])), forward: SIMD3(Float(f[0]), Float(f[1]), Float(f[2])),
+                                  up: SIMD3(Float(u[0]), Float(u[1]), Float(u[2])), fovY: Float((sv["fov_y_deg"] as? Double) ?? 60))
+        }
         chunks = list.compactMap { c in
             guard let id = c["id"] as? Int, let a = c["bbox_min"] as? [Double], let b = c["bbox_max"] as? [Double],
                   let levels = c["levels"] as? [[String: Any]] else { return nil }
-            return Chunk(id: id, min: SIMD3(Float(a[0]), Float(a[1]), Float(a[2])), max: SIMD3(Float(b[0]), Float(b[1]), Float(b[2])),
-                         levelSplats: levels.map { ($0["splats"] as? Int) ?? 0 })
+            var chunk = Chunk(id: id, min: SIMD3(Float(a[0]), Float(a[1]), Float(a[2])), max: SIMD3(Float(b[0]), Float(b[1]), Float(b[2])),
+                              levelSplats: levels.map { ($0["splats"] as? Int) ?? 0 })
+            chunk.cellM = levels.map { Float(($0["cell_m"] as? Double) ?? 0) }
+            chunk.growth = levels.map { Float(($0["growth"] as? Double) ?? 1) }
+            if let d = levels.last?["delta"] as? [String: Any] { chunk.deltaOver = d["over"] as? Int }
+            return chunk
+        }
+        // Chunk files never change for the same index: keep them on disk (opening the scene again is instant).
+        let key = "\(ply)|\(json["splats"] ?? 0)|\(version)|\(chunks.count)"
+        var hash: UInt64 = 1469598103934665603
+        for b in key.utf8 { hash = (hash ^ UInt64(b)) &* 1099511628211 }
+        if let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            let dir = caches.appendingPathComponent("lod").appendingPathComponent(String(hash, radix: 16))
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            cacheDir = dir
         }
         let capacity = min(budget, max(totalFull, 1))
         progress("Downloading the whole scene (coarse)…")
@@ -176,14 +214,50 @@ final class SplatLOD {
         return first
     }
 
-    private func fetch(id: Int, level: Int) async throws -> DecodedSplats {
-        guard let url = settings.url("/api/splat/lod/chunk", query: ["ply": ply, "id": String(id), "level": String(level),
-                                                                     "sh": "1", "fmt": "3"]) else { throw SplatLoaderError.bad("No PC address") }
+    private func fetch(id: Int, level: Int, delta: Bool = false) async throws -> DecodedSplats {
+        let file = cacheDir?.appendingPathComponent("c\(id)_l\(level)\(delta ? "d" : "").f3")
+        if let file = file, let data = try? Data(contentsOf: file), let decoded = try? SplatFormat3.decode(data) {
+            return decoded
+        }
+        var query = ["ply": ply, "id": String(id), "level": String(level), "sh": "1", "fmt": "3"]
+        if delta { query["delta"] = "1" }
+        guard let url = settings.url("/api/splat/lod/chunk", query: query) else { throw SplatLoaderError.bad("No PC address") }
         var request = URLRequest(url: url, timeoutInterval: 120)
         request.setValue(settings.token, forHTTPHeaderField: "X-Token")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw SplatLoaderError.bad("Chunk \(id) failed") }
-        return try SplatFormat3.decode(data)
+        let decoded = try SplatFormat3.decode(data)
+        if let file = file { try? data.write(to: file, options: .atomic) }
+        return decoded
+    }
+
+    /// Full detail from L1 + the delta (v3+): L1's splats were grown by `growth`, so their covariances are divided by
+    /// growth² first (the normalised covariance keeps its scale in the record's last float).
+    private func fetchFull(chunk c: Chunk) async throws -> DecodedSplats {
+        let full = c.levelSplats.count - 1
+        guard let over = c.deltaOver, let base = await MainActor.run(body: { self.cache[c.id]?[over] }) else {
+            return try await fetch(id: c.id, level: full)
+        }
+        let delta = try await fetch(id: c.id, level: full, delta: true)
+        let g = c.growth.indices.contains(over) ? c.growth[over] : 1
+        var gs = base.gs
+        if g > 1.0001 {
+            let inv = 1 / (g * g)
+            gs.withUnsafeMutableBytes { raw in
+                for i in 0..<base.count {
+                    let p = raw.baseAddress!.advanced(by: i * SplatLoader.stride + 28)
+                    p.storeBytes(of: p.load(as: Float.self) * inv, as: Float.self)
+                }
+            }
+        }
+        gs.append(delta.gs)
+        var sh: Data?
+        if base.sh != nil || delta.sh != nil {
+            var s = base.sh ?? Data(count: base.count * 18)
+            s.append(delta.sh ?? Data(count: delta.count * 18))
+            sh = s
+        }
+        return DecodedSplats(count: base.count + delta.count, gs: gs, sh: sh, positions: base.positions + delta.positions)
     }
 
     /// Copies the chosen level of every chunk into `target` (one level per chunk, within capacity).
@@ -218,10 +292,20 @@ final class SplatLOD {
         // Wanted level from the chunk's size on screen.
         var plan: [(chunk: Chunk, px: Float, level: Int)] = chunks.map { c in
             let nearest = simd_clamp(eye, c.min, c.max)
-            let dist = max(simd_distance(eye, nearest), 0.1)
+            let dist = max(simd_distance(eye, nearest), 0.05)
             let px = simd_length(c.max - c.min) / dist * focal
+            let finest = c.levelSplats.count - 1
+            if version >= 3, c.cellM.count == c.levelSplats.count {
+                // Coarsest level whose splats stay ≤ pick_px on screen; going coarser again needs a margin (hysteresis).
+                var level = finest
+                for l in 0...finest where c.cellM[l] * focal / dist <= pickPx { level = l; break }
+                if let current = wanted[c.id], level < current, c.cellM[level] * focal / dist > pickPx / hysteresis {
+                    level = current
+                }
+                return (c, px, level)
+            }
             let level = px > 1500 ? 2 : (px > 500 ? 1 : 0)
-            return (c, px, min(level, c.levelSplats.count - 1))
+            return (c, px, min(level, finest))
         }
         // Stay within the budget: downgrade the smallest-on-screen chunks first.
         var total = plan.reduce(0) { $0 + $1.chunk.levelSplats[$1.level] }
@@ -232,14 +316,19 @@ final class SplatLOD {
             }
         }
         wanted = Dictionary(uniqueKeysWithValues: plan.map { ($0.chunk.id, $0.level) })
-        // Fetch what's missing, nearest first, 3 at a time.
-        for item in plan.sorted(by: { $0.px > $1.px }) where item.level > 0 && cache[item.chunk.id]?[item.level] == nil {
+        // Fetch what's missing, nearest first, 4 at a time.
+        for var item in plan.sorted(by: { $0.px > $1.px }) where item.level > 0 && cache[item.chunk.id]?[item.level] == nil {
+            if let over = item.chunk.deltaOver, item.level == item.chunk.levelSplats.count - 1,
+               over > 0, cache[item.chunk.id]?[over] == nil {
+                item.level = over      // L1 first; the delta follows on the next plan
+            }
             let key = "\(item.chunk.id)/\(item.level)"
-            guard inFlight.count < 3, !inFlight.contains(key) else { continue }
+            guard inFlight.count < 4, !inFlight.contains(key) else { continue }
             inFlight.insert(key)
-            let id = item.chunk.id, level = item.level
+            let id = item.chunk.id, level = item.level, chunk = item.chunk
+            let useDelta = level == chunk.levelSplats.count - 1 && chunk.deltaOver != nil
             Task {
-                let decoded = try? await self.fetch(id: id, level: level)
+                let decoded = useDelta ? try? await self.fetchFull(chunk: chunk) : try? await self.fetch(id: id, level: level)
                 await MainActor.run {
                     self.inFlight.remove(key)
                     if let d = decoded { self.cache[id, default: [:]][level] = d }
@@ -260,7 +349,11 @@ final class SplatLOD {
             var l = want
             while l > 0 && cache[c.id]?[l] == nil { l -= 1 }
             levels[c.id] = l
-            for extra in (cache[c.id]?.keys.filter { $0 > want && $0 != l }) ?? [] { cache[c.id]?[extra] = nil }
+            // Keep L1 while L2 is wanted (the delta builds on it); drop finer levels nobody wants.
+            let deltaFull = c.deltaOver != nil && l == c.levelSplats.count - 1
+            for extra in (cache[c.id]?.keys.filter { ($0 > want && $0 != l) || (deltaFull && $0 > 0 && $0 < l) }) ?? [] {
+                cache[c.id]?[extra] = nil   // L2 already holds L1 (rescaled): the disk cache brings L1 back instantly if needed
+            }
         }
         guard levels != shown else { return }
         composing = true

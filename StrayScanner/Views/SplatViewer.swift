@@ -880,6 +880,11 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
     private var commandQueue: MTLCommandQueue?
     private var yaw: Float = 0, pitch: Float = 0.35, distance: Float = 3
     private var target = SIMD3<Float>(0, 0, 0)
+    /// Vertical field of view; the PC's start view (the photo/keyframe the splat was made from) sets it.
+    private var fovY: Float = 60 * .pi / 180
+    private var startView: SplatLOD.StartView?
+    /// One-photo splats only look right near the photo: keep the orbit within ±45° of it.
+    private var orbitLimit: (yaw: Float, pitch: Float)?
     private let inFlight = DispatchSemaphore(value: 3)
     init(device: MTLDevice, splats: SplatData) {
         super.init(frame: .zero, device: device)
@@ -910,6 +915,21 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
 
     func resetCamera() {
         guard let splats = renderer?.splats else { return }
+        if let sv = startView {
+            // Open where the camera stood (PLY frame, OpenCV camera): orbit around a point ahead of it.
+            let eye = splats.orientation * sv.eye
+            let forward = simd_normalize(splats.orientation * sv.forward)
+            let ahead = simd_dot(splats.center - eye, forward)
+            let d = min(max(ahead, 0.3), splats.radius * 2)
+            target = eye + forward * d
+            distance = d
+            yaw = atan2(-forward.x, -forward.z)
+            pitch = asin(min(max(-forward.y, -1), 1))
+            fovY = min(max(sv.fovY, 20), 100) * .pi / 180
+            orbitLimit = orbitLimit.map { _ in (yaw, pitch) }
+            setNeedsDisplay()
+            return
+        }
         target = splats.center
         distance = splats.radius * 1.6
         yaw = 0
@@ -922,6 +942,11 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
     func attach(lod: SplatLOD?) {
         renderer?.lod = lod
         lod?.onRefined = { [weak self] in self?.setNeedsDisplay() }
+        if let sv = lod?.startView {
+            startView = sv
+            orbitLimit = (lod?.ply.contains("i2s_") ?? false) ? (0, 0) : nil
+            resetCamera()
+        }
     }
 
     private var stillTimer: Timer?
@@ -944,6 +969,13 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         g.setTranslation(.zero, in: self)
         yaw -= Float(d.x) * 0.008
         pitch = min(max(pitch + Float(d.y) * 0.006, -1.4), 1.4)
+        if let limit = orbitLimit {
+            let k: Float = .pi / 4
+            var dy = yaw - limit.yaw
+            dy = atan2(sin(dy), cos(dy))
+            yaw = limit.yaw + min(max(dy, -k), k)
+            pitch = min(max(pitch, limit.pitch - k), limit.pitch + k)
+        }
         setNeedsDisplay()
     }
 
@@ -985,7 +1017,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         let eye = target + distance * SIMD3<Float>(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch))
         var viewMatrix = ScanRenderer.lookAt(eye: eye, target: target, up: SIMD3<Float>(0, 1, 0))
         viewMatrix = viewMatrix * (renderer.splats.orientation4)
-        let projection = ScanRenderer.perspective(fovY: Float(60.0 * Double.pi / 180.0),
+        let projection = ScanRenderer.perspective(fovY: fovY,
                                                   aspect: Float(size.width / max(size.height, 1)),
                                                   near: max(distance * 0.01, 0.01), far: max(distance * 50, 100))
         // Dynamic resolution: while you drag, the Speed setting (lower resolution + MetalFX, distance LOD);
