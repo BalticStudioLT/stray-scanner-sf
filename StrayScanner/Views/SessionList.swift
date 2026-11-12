@@ -103,7 +103,7 @@ struct SessionList: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     NavigationLink(destination: SplatForgeView()) {
-                        Image(systemName: "desktopcomputer")
+                        Label("PC splats", systemImage: "desktopcomputer").labelStyle(.titleAndIcon)
                     }
                     .accessibilityLabel("SplatForge on the PC")
                 }

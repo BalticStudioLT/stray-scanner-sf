@@ -62,6 +62,7 @@ struct SessionDetailView: View {
         ZStack {
         Color("BackgroundColor")
             .edgesIgnoringSafeArea(.all)
+        ScrollView {
         VStack {
             VideoPlayer(player: player ?? AVPlayer(url: defaultUrl))
                 // The video is stored the way the sensor sees it (landscape); scans are filmed upright,
@@ -102,6 +103,10 @@ struct SessionDetailView: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 10)
+            }
+
+            if let folder = recording.directoryPath() {
+                ScanSplatsSection(folder: folder)
             }
 
             // Two even columns of full-width buttons (an HStack squeezed the labels into tall empty pills).
@@ -166,7 +171,8 @@ struct SessionDetailView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 20)
-            Spacer()
+            .padding(.bottom, 24)
+        }
         }
         .onReceive(NotificationCenter.default.publisher(for: PCUploader.statusNotification)) { note in
             guard let scan = note.userInfo?["scan"] as? String,

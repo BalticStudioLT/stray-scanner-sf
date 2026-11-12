@@ -55,3 +55,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-06 00:46 "Splatforge responded"
 - 2026-11-06 07:33 (screenshot: phone training result = blurry giant blobs) "Tried render, its terrible. Just a mess of blobs"
 - 2026-11-11 19:50 "update app based on all last things. check fable, opus etc." → LOD v4 (merged L0, pick rule, L2 delta), start_view, footprint cull + clamped Jacobian, disk cache
+- 2026-11-12 22:04 "put it to phone" → reinstalled latest build via Xcode
+- 2026-11-13 00:25 "I cant ser rendered splats on phone. Where are they"
