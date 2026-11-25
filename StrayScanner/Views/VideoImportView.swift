@@ -25,6 +25,7 @@ struct VideoActionsSheet: View {
     @StateObject private var aligner = PhoneVideoAligner()
     @State private var sent = false
     @State private var thumbnail: UIImage?
+    @AppStorage("AlignDetailed") private var detailed = true
 
     var body: some View {
         NavigationStack {
@@ -62,14 +63,23 @@ struct VideoActionsSheet: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Align on this phone (beta)", systemImage: "iphone").font(.headline)
-                        Text("No PC needed. Apple's photogrammetry finds the camera path from up to 300 of the sharpest frames (4 per second; works best for objects and small spaces, filmed slowly with lots of overlap). The result is added to Scans, where Train here makes the splat.")
+                        Text("No PC needed. Apple's photogrammetry finds the camera path from the sharpest frames (works best for objects and small spaces, filmed slowly with lots of overlap). The result is added to Scans, where Train here makes the splat.")
                             .font(.caption).foregroundStyle(.secondary)
+                        Toggle(isOn: $detailed) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Detailed tracking")
+                                Text(detailed ? "8 frames/s (up to 600) + Apple's rough 3-D model for thousands of starting points. About 2–3× slower."
+                                              : "4 frames/s (up to 300), a few hundred starting points. Faster.")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(isWorking)
                         alignerStatus
                         if !PhoneVideoAligner.isSupported {
                             Text("Not available on this phone.").font(.caption).foregroundStyle(.orange)
                         }
                         Button {
-                            if isWorking { aligner.cancel() } else { aligner.align(video: video.url, title: video.title) }
+                            if isWorking { aligner.cancel() } else { aligner.align(video: video.url, title: video.title, detailed: detailed) }
                         } label: {
                             Label(isWorking ? "Stop" : "Align on this phone", systemImage: isWorking ? "stop.fill" : "point.3.connected.trianglepath.dotted")
                                 .frame(maxWidth: .infinity, minHeight: 32)

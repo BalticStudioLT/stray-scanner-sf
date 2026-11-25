@@ -553,12 +553,35 @@ final class PhoneTrainer: ObservableObject {
                     if out.count >= maxSplats { break }
                 }
             }
+            // Points from Apple's model surface (detailed alignment) have no colour yet (−1): take it from the first
+            // keyframe that sees them.
+            let sxColour = Float(width) / scan.videoWidth
+            var remaining = out.indices.filter { out[$0].rgb.x < 0 }
+            for pose in frames where !remaining.isEmpty {
+                guard let image = images[pose.frame], let px = PhoneTrainer.rgba(image) else { continue }   // one frame at a time
+                let toCam = pose.cvCameraToWorld.inverse
+                let k = pose.intrinsics * SIMD4(sxColour, sxColour, sxColour, sxColour)
+                remaining = remaining.filter { i in
+                    let c = toCam * SIMD4<Float>(out[i].position, 1)
+                    guard c.z > 0.05 else { return true }
+                    let u = k.x * c.x / c.z + k.z, v = k.y * c.y / c.z + k.w
+                    guard u >= 0, v >= 0, u < Float(width), v < Float(height) else { return true }
+                    let o = (Int(v) * width + Int(u)) * 4
+                    out[i].rgb = SIMD3<Float>(Float(px[o]), Float(px[o + 1]), Float(px[o + 2])) / 255
+                    return false
+                }
+            }
+            if !remaining.isEmpty {
+                let unseen = Set(remaining)
+                out = out.enumerated().filter { !unseen.contains($0.offset) }.map { $0.element }
+            }
             // The alignment gives only a few hundred points — far too few to cover a room. Fill each keyframe's view
             // with splats at about that camera's typical distance to the points (coloured from the frame); training
             // and relocation then pull them onto the real surfaces.
             let sparse = PhoneTrainer.nnScales(out, voxel: max(voxel, 0.03))
             var fill: [TrainParams] = []
-            let perFrame = max(200, min(4000, (maxSplats / 2) / max(frames.count, 1)))
+            // With a model surface (thousands of points) only a light fill is needed.
+            let perFrame = out.count > 20_000 ? 150 : max(200, min(4000, (maxSplats / 2) / max(frames.count, 1)))
             let sx = Float(width) / scan.videoWidth
             for pose in frames {
                 guard let image = images[pose.frame], let pixels = PhoneTrainer.rgba(image) else { continue }

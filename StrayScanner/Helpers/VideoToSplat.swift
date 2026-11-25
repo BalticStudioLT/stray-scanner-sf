@@ -18,6 +18,7 @@ import AVFoundation
 import CoreData
 import RealityKit
 import CoreImage
+import ModelIO
 
 // MARK: - Picked / shared videos
 
@@ -363,13 +364,19 @@ final class PhoneVideoAligner: ObservableObject {
 
     func cancel() { task?.cancel() }
 
-    func align(video: URL, title: String, framesPerSecond: Double = 4, maxFrames: Int = 300) {
+    /// detailed (owner 2026-11-25 "Can we get more detailed tracking?"): 8 frames/s up to 600, and Apple's rough
+    /// 3-D model is made too — its surface gives thousands of starting points instead of a few hundred.
+    func align(video: URL, title: String, detailed: Bool = false) {
+        align(video: video, title: title, framesPerSecond: detailed ? 8 : 4, maxFrames: detailed ? 600 : 300, mesh: detailed)
+    }
+
+    func align(video: URL, title: String, framesPerSecond: Double, maxFrames: Int, mesh: Bool) {
         task?.cancel()
         task = Task { [weak self] in
             guard let self = self else { return }
             do {
                 guard #available(iOS 17.0, *) else { throw TrainError("Needs iOS 17 or newer") }
-                let name = try await self.run(video: video, title: title, fps: framesPerSecond, maxFrames: maxFrames)
+                let name = try await self.run(video: video, title: title, fps: framesPerSecond, maxFrames: maxFrames, mesh: mesh)
                 self.state = .done(name)
             } catch is CancellationError {
                 self.state = .failed("Stopped")
@@ -380,7 +387,7 @@ final class PhoneVideoAligner: ObservableObject {
     }
 
     @available(iOS 17.0, *)
-    private func run(video: URL, title: String, fps: Double, maxFrames: Int) async throws -> String {
+    private func run(video: URL, title: String, fps: Double, maxFrames: Int, mesh: Bool) async throws -> String {
         guard PhotogrammetrySession.isSupported else {
             throw TrainError("This phone cannot run Apple's photogrammetry (needs an iPhone Pro with LiDAR)")
         }
@@ -446,25 +453,36 @@ final class PhoneVideoAligner: ObservableObject {
         configuration.sampleOrdering = .sequential
         configuration.featureSensitivity = .high
         let session = try PhotogrammetrySession(input: samples, configuration: configuration)
-        try session.process(requests: [.poses, .pointCloud])
+        let meshURL = folder.appendingPathComponent("phone_model.usdz")
+        var requests: [PhotogrammetrySession.Request] = [.poses, .pointCloud]
+        if mesh { requests.append(.modelFile(url: meshURL, detail: .reduced)) }
+        try session.process(requests: requests)
+        var meshDone = false
         var poses: PhotogrammetrySession.Poses?
         var cloud: PhotogrammetrySession.PointCloud?
         var failure: String?
         // Two requests run one after the other: camera path (poses), then the sparse points.
         var lastStage = ""
         var lastPercent = -1
+        var lastName = ""
         outputs: for try await output in session.outputs {
             if Task.isCancelled { session.cancel(); throw CancellationError() }
             switch output {
             case .requestProgress(let request, let fraction):
-                let isPoses: Bool
-                if case .poses = request { isPoses = true } else { isPoses = false }
-                let overall = isPoses ? 0.2 + 0.6 * fraction : 0.8 + 0.2 * fraction
-                state = .working(isPoses ? "Finding the camera path…" : "Making the starting points…", overall)
+                let name: String, overall: Double
+                switch request {
+                case .poses: name = "camera path"; overall = 0.2 + (mesh ? 0.4 : 0.6) * fraction
+                case .modelFile: name = "3-D model"; overall = 0.6 + 0.35 * fraction
+                default: name = "points"; overall = (mesh ? 0.95 : 0.8) + (mesh ? 0.05 : 0.2) * fraction
+                }
+                state = .working(name == "camera path" ? "Finding the camera path…"
+                                 : name == "3-D model" ? "Building a rough 3-D model (detailed)…" : "Making the starting points…",
+                                 overall)
                 let percent = Int(fraction * 100)
-                if percent / 25 != lastPercent / 25 {
+                if percent / 25 != lastPercent / 25 || name != lastName {
                     lastPercent = percent
-                    note((isPoses ? "camera path " : "points ") + "\(percent)%")
+                    lastName = name
+                    note(name + " \(percent)%")
                 }
             case .requestProgressInfo(_, let info):
                 let stage = info.processingStage.map { "\($0)" } ?? ""
@@ -490,13 +508,18 @@ final class PhoneVideoAligner: ObservableObject {
                     }
                     state = .working("Making the starting points…", 0.8)
                     stepStarted = Date()
+                case .modelFile:
+                    meshDone = true
+                    note("3-D model done")
                 case .pointCloud(let c):
                     cloud = c
                     note("points done: \(c.points.count)")
                 default: break
                 }
             case .requestError(let request, let error):
-                if case .pointCloud = request {
+                if case .modelFile = request {
+                    note("3-D model failed (\(error.localizedDescription)) — using the points only")
+                } else if case .pointCloud = request {
                     note("points failed (\(error.localizedDescription)))")
                 } else {
                     failure = error.localizedDescription
@@ -524,7 +547,16 @@ final class PhoneVideoAligner: ObservableObject {
         // Scale: the engine's units are arbitrary for plain video; make the median camera-to-point distance 2 m so
         // the trainer's sizes (mm … cm) fit.
         var scale: Float = 1
-        let points = cloud?.points ?? []
+        var points: [(position: SIMD3<Float>, color: SIMD3<Float>)] = (cloud?.points ?? []).map {
+            ($0.position, SIMD3(Float($0.color.x), Float($0.color.y), Float($0.color.z)) / 255)
+        }
+        if meshDone {
+            let surface = PhoneVideoAligner.meshVertices(meshURL, limit: 300_000)
+            note("model surface: \(surface.count) points")
+            // Colour unknown (−1): the trainer colours them from the frames.
+            points += surface.map { ($0, SIMD3<Float>(-1, -1, -1)) }
+            try? FileManager.default.removeItem(at: meshURL)
+        }
         if !points.isEmpty {
             let centres = found.posesBySample.values.map { $0.translation }
             var distances: [Float] = []
@@ -556,14 +588,13 @@ final class PhoneVideoAligner: ObservableObject {
         try csv.write(to: folder.appendingPathComponent("odometry.csv"), atomically: true, encoding: .utf8)
         var binary = Data(capacity: points.count * 24)
         for p in points {
-            var row: [Float] = [p.position.x * scale, p.position.y * scale, p.position.z * scale,
-                                Float(p.color.x) / 255, Float(p.color.y) / 255, Float(p.color.z) / 255]
+            var row: [Float] = [p.position.x * scale, p.position.y * scale, p.position.z * scale, p.color.x, p.color.y, p.color.z]
             binary.append(Data(bytes: &row, count: 24))
         }
         try binary.write(to: folder.appendingPathComponent("points.bin"))
         let settings: [String: Any] = ["source": "phone_aligned_video", "video_width": Int(w), "video_height": Int(h),
                                        "frames_dir": "frames", "aligned_frames": found.posesBySample.count,
-                                       "frames_taken": times.count, "video_fps": Double(times.count) / duration, "points": points.count, "scale_to_metres": scale,
+                                       "frames_taken": times.count, "detailed": mesh, "video_fps": Double(times.count) / duration, "points": points.count, "scale_to_metres": scale,
                                        "alignment": "RealityKit PhotogrammetrySession (on the phone)", "video_frame_offset": 0]
         let json = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
         try json.write(to: folder.appendingPathComponent("capture_settings.json"))
@@ -582,6 +613,26 @@ final class PhoneVideoAligner: ObservableObject {
         NotificationCenter.default.post(name: NSNotification.Name("sessionsChanged"), object: nil)
         try? FileManager.default.removeItem(at: video)
         return "\(found.posesBySample.count) of \(times.count) frames aligned · \(points.count) points"
+    }
+
+    /// Vertex positions of the model Apple made (world coordinates, same as the camera poses).
+    static func meshVertices(_ url: URL, limit: Int) -> [SIMD3<Float>] {
+        guard MDLAsset.canImportFileExtension("usdz") else { return [] }
+        let asset = MDLAsset(url: url)
+        var out: [SIMD3<Float>] = []
+        for object in asset.childObjects(of: MDLMesh.self) {
+            guard let mesh = object as? MDLMesh,
+                  let data = mesh.vertexAttributeData(forAttributeNamed: MDLVertexAttributePosition, as: .float3) else { continue }
+            let world = MDLTransform.globalTransform(with: mesh, atTime: 0)
+            let step = max(1, (mesh.vertexCount + out.count) / max(limit - out.count, 1))
+            for i in Swift.stride(from: 0, to: mesh.vertexCount, by: step) {
+                let v = (data.dataStart + i * data.stride).assumingMemoryBound(to: Float.self)
+                let w = world * SIMD4<Float>(v[0], v[1], v[2], 1)
+                out.append(SIMD3(w.x, w.y, w.z))
+                if out.count >= limit { return out }
+            }
+        }
+        return out
     }
 
     /// Edge energy of a small grey copy: higher = sharper (less motion blur).
