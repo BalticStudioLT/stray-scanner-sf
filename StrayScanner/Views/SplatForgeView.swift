@@ -125,6 +125,7 @@ private func eta(_ seconds: Double?) -> String? {
 }
 
 struct SplatForgeView: View {
+    @Binding var pendingVideo: PendingVideo?
     @StateObject private var client = SplatForgeClient()
     @State private var showingSettings = false
     @State private var showingStudio = false
@@ -146,6 +147,7 @@ struct SplatForgeView: View {
             liveSection
             phoneScanSplatsSection
             phoneSplatsSection
+            VideoSourcesSection(pending: $pendingVideo)
             otherSplatsSection
             machineSection
             activitySection

@@ -17,12 +17,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Override point for customization after application launch.
         appDaemon = AppDaemon(appDelegate: self)
         PCUploader.shared.reconnect()
+        VideoUploader.shared.reconnect()
         return true
     }
 
     /// iOS finished (or needs to report on) background uploads to the PC while the app was not running.
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
+        if identifier == VideoUploader.backgroundIdentifier {
+            VideoUploader.shared.backgroundCompletion = completionHandler
+            VideoUploader.shared.reconnect()
+            return
+        }
         guard identifier == PCUploader.backgroundIdentifier else { completionHandler(); return }
         PCUploader.shared.backgroundCompletion = completionHandler
         PCUploader.shared.reconnect()

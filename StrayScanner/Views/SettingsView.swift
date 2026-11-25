@@ -21,6 +21,9 @@ struct SettingsView: View {
     @State private var pcTestOK = false
     @State private var testing = false
     @State private var freeSpace = "–"
+    @AppStorage(ImmichSettings.serverKey) private var immichServer = ""
+    @AppStorage(ImmichSettings.apiKeyKey) private var immichKey = ""
+    @State private var immichTest: String?
 
     private let has4K = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution != nil
     private let hasStills = StillSetting.isSupported
@@ -86,6 +89,25 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    TextField("Server, e.g. 100.64.0.5:2283", text: $immichServer)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("API key", text: $immichKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Test Immich") { testImmich() }
+                        .disabled(immichServer.isEmpty || immichKey.isEmpty)
+                    if let result = immichTest {
+                        Text(result).font(.caption).foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Immich (videos to splat)")
+                } footer: {
+                    Text("Lets the Splats tab list videos from your Immich server. Make an API key in Immich ▸ Account settings ▸ API keys (asset.read, asset.download are enough). Videos in Photos or Files need no setup.")
+                }
+
+                Section {
                     Button("How to scan well") { showingHelp = true }
                     LabeledContent("Free space on this phone", value: freeSpace)
                     LabeledContent("App version", value: appVersion)
@@ -110,6 +132,18 @@ struct SettingsView: View {
         let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
         let build = (info?["CFBundleVersion"] as? String) ?? "?"
         return "\(version) (\(build))"
+    }
+
+    private func testImmich() {
+        immichTest = "Checking…"
+        Task {
+            do {
+                let result = try await ImmichClient.videos(ImmichSettings.load(), page: 1)
+                immichTest = result.videos.isEmpty ? "Connected, but no videos found" : "Connected — \(result.videos.count)\(result.more ? "+" : "") videos"
+            } catch {
+                immichTest = error.localizedDescription
+            }
+        }
     }
 
     private func refresh() {

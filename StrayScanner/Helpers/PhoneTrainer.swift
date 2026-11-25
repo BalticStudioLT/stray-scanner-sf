@@ -189,7 +189,9 @@ final class PhoneTrainer: ObservableObject {
         publish(.loading("Placing splats on the LiDAR points…"))
         let initial = initialSplats(scan: scan, frames: picks, images: cgImages, width: width, height: height,
                                     voxel: opt.voxel, maxSplats: opt.maxSplats)
-        guard initial.count > 1000 else { throw TrainError("Too little LiDAR depth in this scan") }
+        guard initial.count > (ScanData.isAlignedVideo(folder) ? 200 : 1000) else {
+            throw TrainError(ScanData.isAlignedVideo(folder) ? "Too few points from the alignment" : "Too little LiDAR depth in this scan")
+        }
         let n = initial.count
         let P = PhoneTrainer.P, G = PhoneTrainer.G
 
@@ -478,9 +480,14 @@ final class PhoneTrainer: ObservableObject {
         var keyframes: [Keyframe] = []
         var images: [Int: CGImage] = [:]
         let sx = Float(width) / scan.videoWidth, sy = Float(height) / scan.videoHeight
+        let framesDir = folder.appendingPathComponent("frames")
+        let fromFrames = ScanData.isAlignedVideo(folder)
         for pose in frames {
             let time = CMTime(seconds: (Double(pose.frame + scan.frameOffset) + 0.5) / scan.fps, preferredTimescale: 6000)
-            guard let image = try? generator.copyCGImage(at: time, actualTime: nil),
+            let picture: CGImage? = fromFrames
+                ? PhoneTrainer.resized(framesDir.appendingPathComponent(String(format: "%06d.jpg", pose.frame)), width: width, height: height)
+                : try? generator.copyCGImage(at: time, actualTime: nil)
+            guard let image = picture,
                   image.width == width, image.height == height,
                   let texture = try? loader.newTexture(cgImage: image, options: [.SRGB: false, .textureStorageMode: MTLStorageMode.private.rawValue])
             else { continue }
@@ -496,6 +503,17 @@ final class PhoneTrainer: ObservableObject {
         }
         guard keyframes.count >= 8 else { throw TrainError("Could not decode the video frames") }
         return (keyframes, images)
+    }
+
+    /// A frame image (video aligned on the phone) scaled to the training size.
+    static func resized(_ url: URL, width: Int, height: Int) -> CGImage? {
+        guard let source = UIImage(contentsOfFile: url.path)?.cgImage,
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()
     }
 
     /// The frame's LiDAR depth in metres (r32Float, sensor orientation like the video), low-confidence pixels = 0.
@@ -521,6 +539,39 @@ final class PhoneTrainer: ObservableObject {
                                width: Int, height: Int, voxel: Float = 0.015, maxSplats: Int = 400_000) -> [TrainParams] {
         var seen = Set<Int64>()
         var out: [TrainParams] = []
+        // Video aligned on the phone: no LiDAR, start from the alignment's sparse points (x y z r g b floats).
+        if let data = try? Data(contentsOf: folder.appendingPathComponent("points.bin")) {
+            let n = data.count / 24
+            data.withUnsafeBytes { raw in
+                for i in 0..<n {
+                    let f = { (k: Int) in raw.loadUnaligned(fromByteOffset: i * 24 + k * 4, as: Float.self) }
+                    let p = SIMD3<Float>(f(0), f(1), f(2))
+                    guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { continue }
+                    let key = (Int64(floor(p.x / voxel)) & 0x1FFFFF) | ((Int64(floor(p.y / voxel)) & 0x1FFFFF) << 21) | ((Int64(floor(p.z / voxel)) & 0x1FFFFF) << 42)
+                    guard seen.insert(key).inserted else { continue }
+                    out.append(TrainParams(rgb: SIMD3(f(3), f(4), f(5)), opacityLogit: -2.2, logScale: log(voxel), position: p))
+                    if out.count >= maxSplats { break }
+                }
+            }
+            // Sparse points: grow each into a few jittered copies inside its own footprint, so there are enough splats
+            // for detail (relocation then moves them where the photos need them).
+            let sized = PhoneTrainer.nnScales(out, voxel: max(voxel, 0.03))
+            guard !sized.isEmpty else { return sized }
+            let copies = min(20, max(1, 150_000 / sized.count))
+            var grown: [TrainParams] = []
+            grown.reserveCapacity(sized.count * copies)
+            for t in sized {
+                grown.append(t)
+                let sigma = exp(t.logScale)
+                for _ in 1..<copies {
+                    var c = t
+                    c.position += SIMD3<Float>(Float.random(in: -1...1), Float.random(in: -1...1), Float.random(in: -1...1)) * sigma
+                    c.logScale = log(sigma * 0.6)
+                    grown.append(c)
+                }
+            }
+            return Array(grown.prefix(maxSplats))
+        }
         for pose in frames {
             guard let image = images[pose.frame], let pixels = PhoneTrainer.rgba(image),
                   let depth = DepthPNG.load(folder.appendingPathComponent("depth").appendingPathComponent(String(format: "%06d.png", pose.frame)))

@@ -252,6 +252,8 @@ struct SessionList: View {
 /// The app's three places: scans on this phone, splats (from the PC or trained here), and settings.
 struct RootView: View {
     @State private var tab = RootView.initialTab
+    /// A video picked in the Splats tab or opened in the app from Files / Immich's share sheet.
+    @State private var pendingVideo: PendingVideo?
 
     /// Debug builds only: `-InitialTab 1` opens another tab at start (Simulator screenshots).
     private static var initialTab: Int {
@@ -268,7 +270,7 @@ struct RootView: View {
                 .tabItem { Label("Scans", systemImage: "viewfinder") }
                 .tag(0)
             NavigationStack {
-                SplatForgeView()
+                SplatForgeView(pendingVideo: $pendingVideo)
             }
             .tabItem { Label("Splats", systemImage: "cube.transparent") }
             .tag(1)
@@ -277,6 +279,14 @@ struct RootView: View {
                 .tag(2)
         }
         .preferredColorScheme(.dark)
+        .sheet(item: $pendingVideo) { video in
+            VideoActionsSheet(video: video)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: VideoInbox.openedNotification)) { note in
+            guard let url = note.object as? URL else { return }
+            tab = 1
+            pendingVideo = PendingVideo(url: url, title: url.lastPathComponent)
+        }
     }
 }
 

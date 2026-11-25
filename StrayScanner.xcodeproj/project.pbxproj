@@ -82,6 +82,10 @@
 		A1B2C3D4E5F6071829304C03 /* SplatLOD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304C01 /* SplatLOD.swift */; };
 		A1B2C3D4E5F6071829304D02 /* ScanSplatsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */; };
 		A1B2C3D4E5F6071829304D03 /* ScanSplatsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */; };
+		A1B2C3D4E5F6071829305102 /* VideoToSplat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305101 /* VideoToSplat.swift */; };
+		A1B2C3D4E5F6071829305103 /* VideoToSplat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305101 /* VideoToSplat.swift */; };
+		A1B2C3D4E5F6071829305202 /* VideoImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305201 /* VideoImportView.swift */; };
+		A1B2C3D4E5F6071829305203 /* VideoImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305201 /* VideoImportView.swift */; };
 		A1B2C3D4E5F6071829305002 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305001 /* SettingsView.swift */; };
 		A1B2C3D4E5F6071829305003 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305001 /* SettingsView.swift */; };
 		A1B2C3D4E5F6071829304F02 /* StillEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */; };
@@ -165,6 +169,8 @@
 		A1B2C3D4E5F6071829304B01 /* PhoneTrainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneTrainer.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304C01 /* SplatLOD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatLOD.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanSplatsSection.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829305101 /* VideoToSplat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoToSplat.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829305201 /* VideoImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoImportView.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829305001 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StillEncoder.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304E01 /* CaptureSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSettings.swift; sourceTree = "<group>"; };
@@ -263,6 +269,7 @@
 				38C17B22259D1C80006B3FDA /* SessionDetail.swift */,
 				A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */,
 				A1B2C3D4E5F6071829305001 /* SettingsView.swift */,
+				A1B2C3D4E5F6071829305201 /* VideoImportView.swift */,
 				5F0E1A2B3C4D5E6F70819A01 /* ScanReplay.swift */,
 				387B57C125EC065600132903 /* InformationView.swift */,
 			);
@@ -339,6 +346,7 @@
 				A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */,
 				A1B2C3D4E5F6071829304C01 /* SplatLOD.swift */,
 				A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */,
+				A1B2C3D4E5F6071829305101 /* VideoToSplat.swift */,
 				A1B2C3D4E5F6071829304E01 /* CaptureSettings.swift */,
 				A1B2C3D4E5F6071829304B01 /* PhoneTrainer.swift */,
 				70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */,
@@ -611,6 +619,8 @@
 				38C17B23259D1C80006B3FDA /* SessionDetail.swift in Sources */,
 				A1B2C3D4E5F6071829304D02 /* ScanSplatsSection.swift in Sources */,
 				A1B2C3D4E5F6071829305002 /* SettingsView.swift in Sources */,
+				A1B2C3D4E5F6071829305202 /* VideoImportView.swift in Sources */,
+				A1B2C3D4E5F6071829305102 /* VideoToSplat.swift in Sources */,
 				A1B2C3D4E5F6071829304F02 /* StillEncoder.swift in Sources */,
 				A1B2C3D4E5F6071829304E02 /* CaptureSettings.swift in Sources */,
 				5F0E1A2B3C4D5E6F70819A02 /* ScanReplay.swift in Sources */,
@@ -664,6 +674,8 @@
 				3863FE6625FCBB0E00C1DA4F /* SessionDetail.swift in Sources */,
 				A1B2C3D4E5F6071829304D03 /* ScanSplatsSection.swift in Sources */,
 				A1B2C3D4E5F6071829305003 /* SettingsView.swift in Sources */,
+				A1B2C3D4E5F6071829305203 /* VideoImportView.swift in Sources */,
+				A1B2C3D4E5F6071829305103 /* VideoToSplat.swift in Sources */,
 				A1B2C3D4E5F6071829304F03 /* StillEncoder.swift in Sources */,
 				A1B2C3D4E5F6071829304E03 /* CaptureSettings.swift in Sources */,
 				5F0E1A2B3C4D5E6F70819A03 /* ScanReplay.swift in Sources */,

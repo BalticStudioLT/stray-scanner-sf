@@ -302,6 +302,18 @@ struct SessionDetailView: View {
 
     func sendToPC() {
         guard let folder = recording.directoryPath() else { return }
+        if ScanData.isAlignedVideo(folder) {
+            // A plain video (aligned on the phone): the PC re-aligns it itself, so send the video, not the folder.
+            let copy = VideoInbox.folder.appendingPathComponent(UUID().uuidString.prefix(8) + ".mov")
+            do {
+                try FileManager.default.copyItem(at: folder.appendingPathComponent("rgb.mp4"), to: copy)
+                VideoUploader.shared.send(file: copy, title: recording.displayTitle)
+                pcStatus = "Sent as a video — progress is in the Splats tab"
+            } catch {
+                pcStatus = "Could not copy the video: \(error.localizedDescription)"
+            }
+            return
+        }
         pcStatus = "Starting…"
         pcProgress = 0
         PCUploader.shared.upload(directory: folder)

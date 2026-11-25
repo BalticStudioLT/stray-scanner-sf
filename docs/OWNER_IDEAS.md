@@ -71,3 +71,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-25 11:15 "add all but make all as options" (phone trainer v2: move/stretch/rotate, LiDAR depth loss, SSIM, MCMC relocation, 720 px + longer + SH1 — each as an option)
 - 2026-11-25 11:26 "can we push it more?" → added Max options: 1080 px frames, 30 000 steps, denser start (1 cm, up to 1 M splats), 300 frames
 - 2026-11-25 13:58 "can i render in phone videos ffrom my gallery or from immich?"
+- 2026-11-25 14:01 "i want all three. third one being camera alligment on phone" → Splats tab ▸ From a video: Photos picker, Immich browser (Settings: server + API key), "Open in Stray SF" from Files; each video can go to the PC (background upload → sf run) or be aligned on the phone (beta, Apple photogrammetry poses + points → a scan Train here can use)

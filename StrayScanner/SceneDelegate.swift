@@ -32,17 +32,34 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             self.window = window
             window.makeKeyAndVisible()
         }
-        if let url = connectionOptions.urlContexts.first?.url { PCLinkSettings.pair(with: url) }
+        if let url = connectionOptions.urlContexts.first?.url {
+            if url.isFileURL {
+                // Cold start from "Open in Stray SF": wait until the tabs exist.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { SceneDelegate.openVideo(url) }
+            } else {
+                PCLinkSettings.pair(with: url)
+            }
+        }
     }
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
         guard let url = URLContexts.first?.url else { return }
+        if url.isFileURL {
+            SceneDelegate.openVideo(url)
+            return
+        }
         let ok = PCLinkSettings.pair(with: url)
         let alert = UIAlertController(title: ok ? "Paired with SplatForge" : "Pairing link had no token",
                                       message: ok ? "Host \(PCLinkSettings.load().host), token saved." : url.absoluteString,
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         window?.rootViewController?.present(alert, animated: true)
+    }
+
+    /// A video shared to the app (Files, Immich, Photos "Open in…"): copy it in and offer Video to splat.
+    static func openVideo(_ url: URL) {
+        guard VideoInbox.isMovie(url), let copy = try? VideoInbox.keep(url) else { return }
+        NotificationCenter.default.post(name: VideoInbox.openedNotification, object: copy)
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {
