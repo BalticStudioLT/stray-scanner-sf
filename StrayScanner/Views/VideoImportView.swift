@@ -82,7 +82,7 @@ struct VideoActionsSheet: View {
                 }
                 .padding(16)
             }
-            .navigationTitle("Video to splat")
+            .navigationTitle("Splat from a video")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -247,18 +247,39 @@ struct ImmichBrowserView: View {
     }
 }
 
+/// Copies a video chosen in the Photos picker into the app and hands it on.
+enum PhotosVideoLoader {
+    static func load(_ item: PhotosPickerItem) async throws -> PendingVideo {
+        // Photos videos are QuickTime or MPEG-4; ask for the movie file itself.
+        if let movie = try await item.loadTransferable(type: PickedMovie.self) {
+            return PendingVideo(url: movie.url, title: "Video from Photos")
+        }
+        // Fallback: the raw bytes (slower, but works for every format Photos can hand over).
+        if let data = try await item.loadTransferable(type: Data.self) {
+            let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "mov"
+            let url = VideoInbox.folder.appendingPathComponent(String(UUID().uuidString.prefix(8)) + "." + ext)
+            try data.write(to: url)
+            return PendingVideo(url: url, title: "Video from Photos")
+        }
+        throw TrainError("Photos did not hand over the video")
+    }
+}
+
 /// Splats tab section: start from a video, and the videos already sent to the PC.
+/// (The pickers themselves are attached to the whole list in SplatForgeView: modifiers on a List section are
+/// copied onto every row, which made the Photos picker fire badly.)
 struct VideoSourcesSection: View {
-    @Binding var pending: PendingVideo?
+    @Binding var showingPhotos: Bool
+    @Binding var showingImmich: Bool
+    let importing: Bool
+    let importError: String?
     @ObservedObject private var uploader = VideoUploader.shared
-    @State private var pickerItem: PhotosPickerItem?
-    @State private var showingImmich = false
-    @State private var importing = false
-    @State private var importError: String?
 
     var body: some View {
         Section {
-            PhotosPicker(selection: $pickerItem, matching: .videos, photoLibrary: .shared()) {
+            Button {
+                showingPhotos = true
+            } label: {
                 Label(importing ? "Copying the video…" : "Video from Photos", systemImage: "photo.on.rectangle")
             }
             .disabled(importing)
@@ -267,6 +288,7 @@ struct VideoSourcesSection: View {
             } label: {
                 Label("Video from Immich", systemImage: "server.rack")
             }
+            if importing { ProgressView() }
             if let error = importError {
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
@@ -290,31 +312,9 @@ struct VideoSourcesSection: View {
                 }
             }
         } header: {
-            Text("From a video")
+            Text("Splat from a video")
         } footer: {
             Text("Any video works: from Photos, Immich, or “Open in Stray SF” from Files. The PC gives the best splat; aligning on the phone is a beta.")
-        }
-        .onChange(of: pickerItem) { item in
-            guard let item = item else { return }
-            importing = true
-            importError = nil
-            Task {
-                defer { Task { @MainActor in importing = false; pickerItem = nil } }
-                do {
-                    if let movie = try await item.loadTransferable(type: PickedMovie.self) {
-                        await MainActor.run { pending = PendingVideo(url: movie.url, title: movie.url.lastPathComponent) }
-                    } else {
-                        await MainActor.run { importError = "Could not read that video" }
-                    }
-                } catch {
-                    await MainActor.run { importError = error.localizedDescription }
-                }
-            }
-        }
-        .sheet(isPresented: $showingImmich) {
-            ImmichBrowserView { video in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { pending = video }
-            }
         }
     }
 }

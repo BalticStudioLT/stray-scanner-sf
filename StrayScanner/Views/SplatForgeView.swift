@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import PhotosUI
 import WebKit
 import UniformTypeIdentifiers
 
@@ -126,6 +127,11 @@ private func eta(_ seconds: Double?) -> String? {
 
 struct SplatForgeView: View {
     @Binding var pendingVideo: PendingVideo?
+    @State private var showingPhotos = false
+    @State private var showingImmich = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var importingVideo = false
+    @State private var videoError: String?
     @StateObject private var client = SplatForgeClient()
     @State private var showingSettings = false
     @State private var showingStudio = false
@@ -147,13 +153,35 @@ struct SplatForgeView: View {
             liveSection
             phoneScanSplatsSection
             phoneSplatsSection
-            VideoSourcesSection(pending: $pendingVideo)
+            VideoSourcesSection(showingPhotos: $showingPhotos, showingImmich: $showingImmich,
+                                importing: importingVideo, importError: videoError)
             otherSplatsSection
             machineSection
             activitySection
             jobsSection
         }
         .listStyle(.insetGrouped)
+        .photosPicker(isPresented: $showingPhotos, selection: $photoItem, matching: .videos,
+                      preferredItemEncoding: .current, photoLibrary: .shared())
+        .onChange(of: photoItem) { item in
+            guard let item = item else { return }
+            importingVideo = true
+            videoError = nil
+            Task { @MainActor in
+                do {
+                    pendingVideo = try await PhotosVideoLoader.load(item)
+                } catch {
+                    videoError = "Could not read that video: " + error.localizedDescription
+                }
+                importingVideo = false
+                photoItem = nil
+            }
+        }
+        .sheet(isPresented: $showingImmich) {
+            ImmichBrowserView { video in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { pendingVideo = video }
+            }
+        }
         .navigationTitle("Splats")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
