@@ -9,6 +9,7 @@
 
 import SwiftUI
 import PhotosUI
+import Photos
 import WebKit
 import UniformTypeIdentifiers
 
@@ -163,6 +164,19 @@ struct SplatForgeView: View {
         .listStyle(.insetGrouped)
         .photosPicker(isPresented: $showingPhotos, selection: $photoItem, matching: .videos,
                       preferredItemEncoding: .current, photoLibrary: .shared())
+        #if DEBUG
+        .task {
+            // Simulator test: -DebugPhotosImport YES loads the newest library video the same way the picker does.
+            guard UserDefaults.standard.bool(forKey: "DebugPhotosImport") else { return }
+            let options = PHFetchOptions()
+            options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+            if let asset = PHAsset.fetchAssets(with: .video, options: options).firstObject {
+                photoItem = PhotosPickerItem(itemIdentifier: asset.localIdentifier)
+            } else {
+                videoError = "Debug: no video in the library"
+            }
+        }
+        #endif
         .onChange(of: photoItem) { item in
             guard let item = item else { return }
             importingVideo = true
