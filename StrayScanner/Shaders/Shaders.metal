@@ -246,6 +246,7 @@ struct GSProjected {
     half4 color;       // SH applied, near fade applied
     float d;
     float sigma2D, sigmaProj;
+    float3 cov2;       // on-screen covariance a, b, c in pixels² (y up), incl. the 0.3 px² low-pass (training)
 };
 
 static GSProjected gsProjectSplat(uint index, const device GSplat* splats, constant GSUniforms& u, const device half* sh) {
@@ -309,6 +310,7 @@ static GSProjected gsProjectSplat(uint index, const device GSplat* splats, const
     r.k = k;
     r.sigma2D = sqrt(l1);
     r.sigmaProj = sqrt(max(l1 - 0.3, 0.0));
+    r.cov2 = float3(a, b, c);
     return r;
 }
 
@@ -825,4 +827,357 @@ kernel void trainGainGrad(uint2 p [[thread_position_in_grid]],
     atomic_fetch_add_explicit(out + 1, s.y, memory_order_relaxed);
     atomic_fetch_add_explicit(out + 2, s.z, memory_order_relaxed);
     atomic_fetch_add_explicit(out + 3, 1.0, memory_order_relaxed);
+}
+
+
+// MARK: - On-phone training v2 (owner 2026-11-25 "add all but make all as options")
+// Splats may move, become flat/stretched and turned, get view-dependent colour (SH degree 1); loss = L1 and/or
+// D-SSIM per pixel, plus an optional LiDAR depth term per splat. Parameters: 24 floats per splat
+//   0-2 position (ARKit world, m) · 3-5 rgb · 6 opacity logit · 7-9 log σ (m) · 10-13 rotation quaternion (w,x,y,z)
+//   14-22 SH1 (coefficient-major: c1 rgb, c2 rgb, c3 rgb) · 23 unused
+// Pipeline per step: trainBuild2 → forward render (viewer) → trainLossGrad (dL/dC per pixel) → trainVertexBack +
+// trainBackward2 (per-splat 2-D gradients, programmable blending, float atomics) → trainProjectBack (2-D → 3-D, depth
+// term) → trainAdam2.
+
+#define TP 24u
+#define TG 12u
+
+struct Train2Uniforms {
+    float4x4 view;
+    float2 focal;       // fx, fy (training pixels)
+    float2 viewport;    // W, H
+    float2 principal;   // cx, cy (training pixels, y down)
+    float2 pad;
+    float4 cameraPos;   // world
+    float depthWeight;  // 0 = off
+    uint movePositions; // 1 = position gradients
+    uint anisotropic;   // 1 = three scales + rotation, 0 = tied scales, no rotation
+    uint useSH;
+    uint count;
+    uint pad0, pad1, pad2;
+};
+
+kernel void trainBuild2(uint i [[thread_position_in_grid]],
+                        const device float* params [[ buffer(0) ]],
+                        device GSplat* splats [[ buffer(1) ]],
+                        device half* sh [[ buffer(2) ]],
+                        constant uint& count [[ buffer(3) ]],
+                        constant uint& useSH [[ buffer(4) ]]) {
+    if (i >= count) return;
+    const device float* q = params + i * TP;
+    float3 s3 = exp(float3(q[7], q[8], q[9]));
+    float4 r = float4(q[10], q[11], q[12], q[13]);
+    r /= max(length(r), 1e-8);
+    float w = r.x, x = r.y, y = r.z, z = r.w;
+    float R[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)},
+                     {2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)},
+                     {2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)}};
+    float cv[6];
+    uint idx = 0;
+    for (uint a = 0; a < 3; a++) {
+        for (uint b = a; b < 3; b++) {
+            float v = 0;
+            for (uint k = 0; k < 3; k++) v += R[a][k] * R[b][k] * s3[k] * s3[k];
+            cv[idx++] = v;
+        }
+    }
+    float scale = max(max(cv[0], cv[3]), max(cv[5], 1e-12));
+    GSplat g;
+    g.position = packed_float3(q[0], q[1], q[2]);
+    for (uint k = 0; k < 6; k++) g.cov[k] = half(cv[k] / scale);
+    g.covScale = scale;
+    float o = 1.0 / (1.0 + exp(-q[6]));
+    g.color = uchar4(uchar3(saturate(float3(q[3], q[4], q[5])) * 255.0 + 0.5), uchar(saturate(o) * 255.0 + 0.5));
+    splats[i] = g;
+    if (useSH != 0u) {
+        for (uint k = 0; k < 9; k++) sh[i * 9u + k] = half(q[14 + k]);
+    }
+}
+
+/// dL/dC per pixel for (1 − λ)·L1 + λ·(1 − SSIM) on gain·C, 7×7 box windows (window centred on the pixel, the usual
+/// fast approximation of the SSIM gradient). Zero where the splats don't cover the pixel or the phone masked it.
+kernel void trainLossGrad(uint2 p [[thread_position_in_grid]],
+                          texture2d<float, access::read> rendered [[ texture(0) ]],
+                          texture2d<float, access::read> target [[ texture(1) ]],
+                          texture2d<float, access::read> mask [[ texture(2) ]],
+                          texture2d<float, access::write> out [[ texture(3) ]],
+                          constant float4& gainLambda [[ buffer(0) ]]) {
+    uint W = rendered.get_width(), H = rendered.get_height();
+    if (p.x >= W || p.y >= H) return;
+    float4 c = rendered.read(p);
+    uint2 mp = uint2(float2(p) * float2(mask.get_width(), mask.get_height()) / float2(W, H));
+    bool masked = mask.get_width() > 1 && mask.read(min(mp, uint2(mask.get_width() - 1, mask.get_height() - 1))).r > 0.5;
+    if (c.a < 0.5 || masked) { out.write(float4(0), p); return; }
+    float3 gain = gainLambda.xyz;
+    float lambda = gainLambda.w;
+    float3 x = gain * c.rgb, y = target.read(p).rgb;
+    float3 g = (1.0 - lambda) * sign(x - y);
+    if (lambda > 0.0) {
+        float3 sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+        float n = 0;
+        for (int dy = -3; dy <= 3; dy++) {
+            for (int dx = -3; dx <= 3; dx++) {
+                int2 q = int2(p) + int2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= int(W) || q.y >= int(H)) continue;
+                float3 a = gain * rendered.read(uint2(q)).rgb, b = target.read(uint2(q)).rgb;
+                sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1;
+            }
+        }
+        float3 mx = sx / n, my = sy / n;
+        float3 vx = max(sxx / n - mx * mx, 0.0), vy = max(syy / n - my * my, 0.0), cxy = sxy / n - mx * my;
+        const float C1 = 0.0001, C2 = 0.0009;
+        float3 A1 = 2 * mx * my + C1, A2 = 2 * cxy + C2, B1 = mx * mx + my * my + C1, B2 = vx + vy + C2;
+        float3 S = A1 * A2 / (B1 * B2);
+        float3 dS = S * (2 * my / A1 + 2 * (y - my) / A2 - 2 * mx / B1 - 2 * (x - mx) / B2);
+        g += lambda * (-dS);
+    }
+    out.write(float4(g * gain, 0), p);
+}
+
+struct TrainOut {
+    float4 position [[position]];
+    float4 color;               // rgb (SH applied) + opacity
+    float2 mUp [[flat]];        // splat centre, pixels, y up
+    float3 conic [[flat]];      // inverse on-screen covariance (a, b, c)
+    uint index [[flat]];
+};
+
+vertex TrainOut trainVertexBack(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                const device GSplat* splats [[ buffer(0) ]],
+                                const device uint* order [[ buffer(1) ]],
+                                constant GSUniforms& u [[ buffer(2) ]],
+                                const device half* sh [[ buffer(3) ]],
+                                const device uint* args [[ buffer(4) ]]) {
+    uint n = args[1];
+    uint index = order[n - 1u - iid];
+    GSOut g = gsProject(vid, index, splats, u, sh);
+    GSProjected p = gsProjectSplat(index, splats, u, sh);
+    TrainOut o;
+    o.position = g.position;
+    o.color = float4(g.color);
+    o.index = index;
+    float2 ndc = p.clip.xy / max(p.clip.w, 1e-6);
+    o.mUp = (ndc * 0.5 + 0.5) * u.viewport;
+    float det = max(p.cov2.x * p.cov2.z - p.cov2.y * p.cov2.y, 1e-8);
+    o.conic = float3(p.cov2.z, -p.cov2.y, p.cov2.x) / det;
+    return o;
+}
+
+/// Front-to-back pass: per-splat dL/d(centre 2-D), dL/d(conic), dL/d(colour), dL/d(opacity logit), visibility.
+fragment BackOut trainBackward2(TrainOut in [[stage_in]],
+                                float Tin [[color(0)]],
+                                float4 frontIn [[color(1)]],
+                                texture2d<float, access::read> rendered [[ texture(0) ]],
+                                texture2d<float, access::read> dLdC [[ texture(1) ]],
+                                device atomic_float* g2 [[ buffer(0) ]]) {
+    BackOut out;
+    out.T = Tin;
+    out.front = frontIn;
+    float H = float(rendered.get_height());
+    float2 d = float2(in.position.x, H - in.position.y) - in.mUp;
+    float power = -0.5 * (in.conic.x * d.x * d.x + in.conic.z * d.y * d.y) - in.conic.y * d.x * d.y;
+    if (power > 0.0) return out;
+    float G = exp(power);
+    float o = in.color.a;
+    float alpha = min(o * G, 0.99);
+    if (alpha < 1.0 / 255.0 || Tin < 1e-4) return out;
+    uint2 p = uint2(in.position.xy);
+    float3 g = dLdC.read(p).rgb;
+    float3 c = in.color.rgb;
+    float T = Tin;
+    float3 finalC = rendered.read(p).rgb;
+    out.T = T * (1.0 - alpha);
+    out.front = float4(frontIn.rgb + T * alpha * c, 1.0);
+    if (all(g == 0.0)) return out;
+    float3 behind = (finalC - frontIn.rgb - T * alpha * c) / max(T * (1.0 - alpha), 1e-4);
+    float3 dc = T * alpha * g;
+    float dAlpha = T * dot(c - behind, g);
+    float dQ = dAlpha * alpha * (1.0 - o);
+    float dG = (o * G < 0.99) ? dAlpha * o : 0.0;
+    float2 dm = dG * G * float2(in.conic.x * d.x + in.conic.y * d.y, in.conic.y * d.x + in.conic.z * d.y);
+    float3 dConic = dG * G * float3(-0.5 * d.x * d.x, -d.x * d.y, -0.5 * d.y * d.y);
+    device atomic_float* q = g2 + in.index * TG;
+    atomic_fetch_add_explicit(q + 0, dm.x, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 1, dm.y, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 2, dConic.x, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 3, dConic.y, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 4, dConic.z, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 5, dc.x, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 6, dc.y, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 7, dc.z, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 8, dQ, memory_order_relaxed);
+    atomic_fetch_add_explicit(q + 9, T * alpha, memory_order_relaxed);
+    return out;
+}
+
+/// 2-D gradients → parameter gradients (one thread per splat), plus the LiDAR depth term. Clears g2.
+kernel void trainProjectBack(uint i [[thread_position_in_grid]],
+                             const device float* params [[ buffer(0) ]],
+                             device float* g2 [[ buffer(1) ]],
+                             device float* grads [[ buffer(2) ]],
+                             constant Train2Uniforms& u [[ buffer(3) ]],
+                             texture2d<float, access::sample> lidar [[ texture(0) ]]) {
+    if (i >= u.count) return;
+    device float* gi = g2 + i * TG;
+    device float* go = grads + i * TP;
+    float in2[10];
+    for (uint k = 0; k < 10; k++) { in2[k] = gi[k]; gi[k] = 0.0; }
+    for (uint k = 0; k < TP; k++) go[k] = 0.0;
+    float vis = in2[9];
+    if (vis <= 0.0) return;
+    const device float* q = params + i * TP;
+    float3 pos = float3(q[0], q[1], q[2]);
+    float4 t = u.view * float4(pos, 1.0);
+    float dist = -t.z;
+    if (dist < 0.02) return;
+    float fx = u.focal.x, fy = u.focal.y;
+    // Colour, opacity.
+    float3 dc = float3(in2[5], in2[6], in2[7]);
+    go[3] = dc.x; go[4] = dc.y; go[5] = dc.z;
+    go[6] = in2[8];
+    if (u.useSH != 0u) {
+        float3 dir = normalize(pos - u.cameraPos.xyz);
+        float b[3] = { -0.48860251 * dir.y, 0.48860251 * dir.z, -0.48860251 * dir.x };
+        for (uint k = 0; k < 3; k++) {
+            go[14 + k * 3 + 0] = dc.x * b[k];
+            go[14 + k * 3 + 1] = dc.y * b[k];
+            go[14 + k * 3 + 2] = dc.z * b[k];
+        }
+    }
+    // Rotation, scales → 3-D covariance.
+    float3 s3 = exp(float3(q[7], q[8], q[9]));
+    float4 r = float4(q[10], q[11], q[12], q[13]);
+    float rl = max(length(r), 1e-8);
+    r /= rl;
+    float w = r.x, x = r.y, y = r.z, z = r.w;
+    float R[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)},
+                     {2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)},
+                     {2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)}};
+    float M[3][3], cov[3][3], Wm[3][3], C[3][3], tmp[3][3];
+    for (uint a = 0; a < 3; a++) for (uint k = 0; k < 3; k++) M[a][k] = R[a][k] * s3[k];
+    for (uint a = 0; a < 3; a++) for (uint b2 = 0; b2 < 3; b2++) {
+        float v = 0; for (uint k = 0; k < 3; k++) v += M[a][k] * M[b2][k]; cov[a][b2] = v;
+    }
+    for (uint a = 0; a < 3; a++) for (uint b2 = 0; b2 < 3; b2++) Wm[a][b2] = u.view[b2][a];
+    for (uint a = 0; a < 3; a++) for (uint b2 = 0; b2 < 3; b2++) {
+        float v = 0; for (uint k = 0; k < 3; k++) v += Wm[a][k] * cov[k][b2]; tmp[a][b2] = v;
+    }
+    for (uint a = 0; a < 3; a++) for (uint b2 = 0; b2 < 3; b2++) {
+        float v = 0; for (uint k = 0; k < 3; k++) v += tmp[a][k] * Wm[b2][k]; C[a][b2] = v;
+    }
+    float J[2][3] = {{fx / dist, 0, fx * t.x / (dist * dist)}, {0, fy / dist, fy * t.y / (dist * dist)}};
+    float S2[2][2];
+    for (uint a = 0; a < 2; a++) for (uint b2 = 0; b2 < 2; b2++) {
+        float v = 0;
+        for (uint k = 0; k < 3; k++) for (uint l = 0; l < 3; l++) v += J[a][k] * C[k][l] * J[b2][l];
+        S2[a][b2] = v + (a == b2 ? 0.3 : 0.0);
+    }
+    float det = max(S2[0][0] * S2[1][1] - S2[0][1] * S2[0][1], 1e-8);
+    float Ci[2][2] = {{S2[1][1] / det, -S2[0][1] / det}, {-S2[0][1] / det, S2[0][0] / det}};
+    float dCon[2][2] = {{in2[2], 0.5 * in2[3]}, {0.5 * in2[3], in2[4]}};
+    float dS2[2][2], t2[2][2];
+    for (uint a = 0; a < 2; a++) for (uint b2 = 0; b2 < 2; b2++) {
+        float v = 0; for (uint k = 0; k < 2; k++) v += Ci[a][k] * dCon[k][b2]; t2[a][b2] = v;
+    }
+    for (uint a = 0; a < 2; a++) for (uint b2 = 0; b2 < 2; b2++) {
+        float v = 0; for (uint k = 0; k < 2; k++) v += t2[a][k] * Ci[k][b2]; dS2[a][b2] = -v;
+    }
+    float dC[3][3], dcov[3][3];
+    for (uint a = 0; a < 3; a++) for (uint b2 = 0; b2 < 3; b2++) {
+        float v = 0;
+        for (uint k = 0; k < 2; k++) for (uint l = 0; l < 2; l++) v += J[k][a] * dS2[k][l] * J[l][b2];
+        dC[a][b2] = v;
+    }
+    for (uint a = 0; a < 3; a++) for (uint b2 = 0; b2 < 3; b2++) {
+        float v = 0;
+        for (uint k = 0; k < 3; k++) for (uint l = 0; l < 3; l++) v += Wm[k][a] * dC[k][l] * Wm[l][b2];
+        dcov[a][b2] = v;
+    }
+    float dM[3][3];
+    for (uint a = 0; a < 3; a++) for (uint k = 0; k < 3; k++) {
+        float v = 0; for (uint l = 0; l < 3; l++) v += (dcov[a][l] + dcov[l][a]) * M[l][k]; dM[a][k] = v;
+    }
+    float3 dlog;
+    for (uint k = 0; k < 3; k++) {
+        float v = 0; for (uint a = 0; a < 3; a++) v += R[a][k] * dM[a][k];
+        dlog[k] = v * s3[k];
+    }
+    if (u.anisotropic != 0u) {
+        go[7] = dlog.x; go[8] = dlog.y; go[9] = dlog.z;
+        float Gr[3][3];
+        for (uint a = 0; a < 3; a++) for (uint k = 0; k < 3; k++) Gr[a][k] = dM[a][k] * s3[k];
+        float4 dq;
+        dq.x = 2 * (-z * Gr[0][1] + y * Gr[0][2] + z * Gr[1][0] - x * Gr[1][2] - y * Gr[2][0] + x * Gr[2][1]);
+        dq.y = 2 * (y * Gr[0][1] + z * Gr[0][2] + y * Gr[1][0] - 2 * x * Gr[1][1] - w * Gr[1][2] + z * Gr[2][0] + w * Gr[2][1] - 2 * x * Gr[2][2]);
+        dq.z = 2 * (-2 * y * Gr[0][0] + x * Gr[0][1] + w * Gr[0][2] + x * Gr[1][0] + z * Gr[1][2] - w * Gr[2][0] + z * Gr[2][1] - 2 * y * Gr[2][2]);
+        dq.w = 2 * (-2 * z * Gr[0][0] - w * Gr[0][1] + x * Gr[0][2] + w * Gr[1][0] - 2 * z * Gr[1][1] + y * Gr[1][2] + x * Gr[2][0] + y * Gr[2][1]);
+        dq -= dot(dq, r) * r;
+        dq /= rl;
+        go[10] = dq.x; go[11] = dq.y; go[12] = dq.z; go[13] = dq.w;
+    } else {
+        float tied = dlog.x + dlog.y + dlog.z;
+        go[7] = tied; go[8] = tied; go[9] = tied;
+    }
+    // Centre.
+    float3 dt = float3(in2[0] * fx / dist, in2[1] * fy / dist,
+                       in2[0] * fx * t.x / (dist * dist) + in2[1] * fy * t.y / (dist * dist));
+    if (u.depthWeight > 0.0 && vis > 0.05) {
+        // LiDAR: the splat's distance vs the measured surface at its pixel (relative, Huber-like), weighted by how
+        // much the splat is seen. Pulls splats onto walls and removes floaters in front of them.
+        float px = fx * t.x / dist + u.principal.x;
+        float py = u.principal.y - fy * t.y / dist;
+        float2 uv = float2(px, py) / u.viewport;
+        if (all(uv > 0.0) && all(uv < 1.0)) {
+            constexpr sampler nearestS(filter::nearest, address::clamp_to_edge);
+            float D = lidar.sample(nearestS, uv).r;
+            if (D > 0.1) {
+                float resid = (dist - D) / D;
+                float dDist = u.depthWeight * min(vis, 1.0) * clamp(resid * 20.0, -1.0, 1.0) / D;
+                dt.z -= dDist;                                    // dist = −t.z
+            }
+        }
+    }
+    if (u.movePositions != 0u) {
+        float3 dpos;
+        for (uint a = 0; a < 3; a++) dpos[a] = Wm[0][a] * dt.x + Wm[1][a] * dt.y + Wm[2][a] * dt.z;
+        go[0] = dpos.x; go[1] = dpos.y; go[2] = dpos.z;
+    }
+}
+
+struct Adam2Uniforms {
+    float lrPos, lrColor, lrOpacity, lrScale, lrRot, lrSH;
+    float beta1, beta2, eps, bias1, bias2;
+    uint count;
+    uint anisotropic;
+    uint pad0, pad1, pad2;
+};
+
+kernel void trainAdam2(uint i [[thread_position_in_grid]],
+                       device float* params [[ buffer(0) ]],
+                       const device float* grads [[ buffer(1) ]],
+                       device float* m [[ buffer(2) ]],
+                       device float* v [[ buffer(3) ]],
+                       constant Adam2Uniforms& a [[ buffer(4) ]]) {
+    if (i >= a.count) return;
+    device float* p = params + i * TP;
+    for (uint k = 0; k < 23; k++) {
+        float lr = k < 3 ? a.lrPos : (k < 6 ? a.lrColor : (k == 6 ? a.lrOpacity : (k < 10 ? a.lrScale : (k < 14 ? a.lrRot : a.lrSH))));
+        if (lr <= 0.0) continue;
+        uint j = i * TP + k;
+        float gk = grads[j];
+        m[j] = a.beta1 * m[j] + (1.0 - a.beta1) * gk;
+        v[j] = a.beta2 * v[j] + (1.0 - a.beta2) * gk * gk;
+        p[k] -= lr * (m[j] / a.bias1) / (sqrt(v[j] / a.bias2) + a.eps);
+    }
+    for (uint k = 3; k < 6; k++) p[k] = saturate(p[k]);
+    p[6] = clamp(p[6], -9.0, 9.0);
+    for (uint k = 7; k < 10; k++) p[k] = clamp(p[k], -9.2, -2.3);   // σ 0.1 mm … 10 cm
+    if (a.anisotropic == 0u) {
+        float s = (p[7] + p[8] + p[9]) / 3.0;
+        p[7] = s; p[8] = s; p[9] = s;
+    }
+    float4 q = float4(p[10], p[11], p[12], p[13]);
+    q /= max(length(q), 1e-8);
+    p[10] = q.x; p[11] = q.y; p[12] = q.z; p[13] = q.w;
+    for (uint k = 14; k < 23; k++) p[k] = clamp(p[k], -1.0, 1.0);
 }

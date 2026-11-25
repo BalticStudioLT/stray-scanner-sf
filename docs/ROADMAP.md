@@ -119,3 +119,6 @@ Found by reading the code and the owner's old-phone settings (4K, 1/500 s, 2.5 s
 - [ ] 4D splat playback in the app (owner 01:03).
 
 Tests for the owner: one scan on High with the usual settings → compare wall texture with an old scan; rename/delete from the list; Splats tab shows the scan's project at the top after training.
+
+## 2026-11-25 — phone trainer v2 (owner: "add all but make all as options")
+Train here ▸ Training options, each on by default: let splats move (from 30 %), flat/stretched + rotated splats (from 50 %), LiDAR surface term, SSIM, MCMC-style relocation of weak splats, SH degree 1; 480/720 px; 3 000/7 000/15 000 steps. All off = the v1 trainer. Backward math (2-D → scales/rotation/position) checked against finite differences. Not yet tested on a real scan.

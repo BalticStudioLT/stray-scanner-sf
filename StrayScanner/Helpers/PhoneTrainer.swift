@@ -25,6 +25,68 @@ struct TrainParams {
     var position: SIMD3<Float>
 }
 
+/// Owner 2026-11-25: "add all but make all as options". Each switch is a Settings ▸ phone training option.
+struct PhoneTrainOptions {
+    static let moveKey = "TrainMovePositions", flatKey = "TrainFlatSplats", depthKey = "TrainLidarDepth"
+    static let ssimKey = "TrainSSIM", relocateKey = "TrainRelocate", shKey = "TrainAngleColour"
+    static let resolutionKey = "TrainResolution", lengthKey = "TrainLength"
+
+    var movePositions = true
+    var flatSplats = true
+    var lidarDepth = true
+    var ssim = true
+    var relocate = true
+    var angleColour = true
+    var width = 720            // 480 or 720
+    var iterations = 7000      // 3000 quick, 7000 better, 15000 best
+
+    static func load() -> PhoneTrainOptions {
+        let d = UserDefaults.standard
+        func flag(_ key: String) -> Bool { d.object(forKey: key) == nil ? true : d.bool(forKey: key) }
+        var o = PhoneTrainOptions()
+        o.movePositions = flag(moveKey); o.flatSplats = flag(flatKey); o.lidarDepth = flag(depthKey)
+        o.ssim = flag(ssimKey); o.relocate = flag(relocateKey); o.angleColour = flag(shKey)
+        if d.object(forKey: resolutionKey) != nil { o.width = d.integer(forKey: resolutionKey) == 480 ? 480 : 720 }
+        if d.object(forKey: lengthKey) != nil { o.iterations = [3000, 7000, 15000].contains(d.integer(forKey: lengthKey)) ? d.integer(forKey: lengthKey) : 7000 }
+        return o
+    }
+
+    /// Everything off = the first phone trainer (colour, opacity and size on fixed round splats).
+    var summary: String {
+        var parts: [String] = []
+        if movePositions { parts.append("moving") }
+        if flatSplats { parts.append("flat") }
+        if lidarDepth { parts.append("LiDAR depth") }
+        if ssim { parts.append("SSIM") }
+        if relocate { parts.append("relocation") }
+        if angleColour { parts.append("angle colour") }
+        return (parts.isEmpty ? "basic" : parts.joined(separator: ", ")) + " · \(width) px · \(iterations) steps"
+    }
+}
+
+private struct Train2Uniforms {
+    var view: simd_float4x4
+    var focal: SIMD2<Float>
+    var viewport: SIMD2<Float>
+    var principal: SIMD2<Float>
+    var pad: SIMD2<Float> = .zero
+    var cameraPos: SIMD4<Float>
+    var depthWeight: Float
+    var movePositions: UInt32
+    var anisotropic: UInt32
+    var useSH: UInt32
+    var count: UInt32
+    var pad0: UInt32 = 0, pad1: UInt32 = 0, pad2: UInt32 = 0
+}
+
+private struct Adam2Uniforms {
+    var lrPos: Float, lrColor: Float, lrOpacity: Float, lrScale: Float, lrRot: Float, lrSH: Float
+    var beta1: Float, beta2: Float, eps: Float, bias1: Float, bias2: Float
+    var count: UInt32
+    var anisotropic: UInt32
+    var pad0: UInt32 = 0, pad1: UInt32 = 0, pad2: UInt32 = 0
+}
+
 private struct TrainUniforms {
     var gain: SIMD4<Float>
     var gradScale: Float
@@ -47,12 +109,14 @@ final class PhoneTrainer: ObservableObject {
     @Published private(set) var liveSplats: SplatData?
 
     let folder: URL
-    var iterations = 3000
+    var iterations = 7000
+    private(set) var options = PhoneTrainOptions()
     private var stopRequested = false
 
     private struct Keyframe {
         let texture: MTLTexture
         let mask: MTLTexture?
+        let depth: MTLTexture?          // LiDAR metres (confident pixels only, 0 = none)
         let view: simd_float4x4          // ARKit world → camera
         let intrinsics: SIMD4<Float>     // fx, fy, cx, cy at training resolution
     }
@@ -69,6 +133,8 @@ final class PhoneTrainer: ObservableObject {
         guard state != .training else { return }
         stopRequested = false
         iteration = 0
+        options = PhoneTrainOptions.load()
+        iterations = options.iterations
         Thread.detachNewThread { [weak self] in
             guard let self = self else { return }
             do {
@@ -83,58 +149,86 @@ final class PhoneTrainer: ObservableObject {
 
     // MARK: - Pipeline
 
+    private static let P = 24      // floats per splat (Shaders.metal TP)
+    private static let G = 12      // 2-D gradient floats per splat (TG)
+
     private func run() throws {
         guard let device = MTLCreateSystemDefaultDevice(), let library = device.makeDefaultLibrary(),
               let queue = device.makeCommandQueue() else { throw TrainError("No Metal GPU") }
+        let opt = options
         publish(.loading("Reading the scan…"))
         let scan = try ScanData(folder: folder)
         publish(.loading("Picking sharp frames…"))
         let picks = scan.pickKeyframes(max: 150)
         guard picks.count >= 8 else { throw TrainError("Not enough sharp frames with poses") }
-        let width = 480, height = Int((480 * scan.videoHeight / scan.videoWidth).rounded())
+        let width = opt.width, height = Int((Float(opt.width) * scan.videoHeight / scan.videoWidth).rounded())
         publish(.loading("Decoding \(picks.count) frames…"))
-        let (keyframes, cgImages) = try loadKeyframes(scan: scan, frames: picks, width: width, height: height, device: device)
+        let (keyframes, cgImages) = try loadKeyframes(scan: scan, frames: picks, width: width, height: height,
+                                                      device: device, withDepth: opt.lidarDepth)
         publish(.loading("Placing splats on the LiDAR points…"))
-        var params = initialSplats(scan: scan, frames: picks, images: cgImages, width: width, height: height)
-        guard params.count > 1000 else { throw TrainError("Too little LiDAR depth in this scan") }
-        let n = params.count
+        let initial = initialSplats(scan: scan, frames: picks, images: cgImages, width: width, height: height)
+        guard initial.count > 1000 else { throw TrainError("Too little LiDAR depth in this scan") }
+        let n = initial.count
+        let P = PhoneTrainer.P, G = PhoneTrainer.G
 
-        guard let paramBuffer = device.makeBuffer(bytes: &params, length: n * MemoryLayout<TrainParams>.stride, options: .storageModeShared),
+        var flat = [Float](repeating: 0, count: n * P)
+        var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        for (i, t) in initial.enumerated() {
+            let o = i * P
+            flat[o] = t.position.x; flat[o + 1] = t.position.y; flat[o + 2] = t.position.z
+            flat[o + 3] = t.rgb.x; flat[o + 4] = t.rgb.y; flat[o + 5] = t.rgb.z
+            flat[o + 6] = t.opacityLogit
+            flat[o + 7] = t.logScale; flat[o + 8] = t.logScale; flat[o + 9] = t.logScale
+            flat[o + 10] = 1
+            lo = simd_min(lo, t.position); hi = simd_max(hi, t.position)
+        }
+        let extent = min(max(simd_length(hi - lo) * 0.5, 1), 10)
+
+        guard let paramBuffer = device.makeBuffer(bytes: &flat, length: n * P * 4, options: .storageModeShared),
               let renderBuffer = device.makeBuffer(length: n * SplatLoader.stride, options: .storageModeShared),
-              let grads = device.makeBuffer(length: n * 5 * 4, options: .storageModePrivate),
-              let m = device.makeBuffer(length: n * 5 * 4, options: .storageModePrivate),
-              let v = device.makeBuffer(length: n * 5 * 4, options: .storageModePrivate),
-              let build = library.makeFunction(name: "trainBuild").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let adam = library.makeFunction(name: "trainAdam").flatMap({ try? device.makeComputePipelineState(function: $0) })
+              let shBuffer = device.makeBuffer(length: n * 18, options: .storageModeShared),
+              let g2 = device.makeBuffer(length: n * G * 4, options: .storageModePrivate),
+              let grads = device.makeBuffer(length: n * P * 4, options: .storageModePrivate),
+              let m = device.makeBuffer(length: n * P * 4, options: .storageModeShared),
+              let v = device.makeBuffer(length: n * P * 4, options: .storageModeShared),
+              let build = library.makeFunction(name: "trainBuild2").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let lossK = library.makeFunction(name: "trainLossGrad").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let projBack = library.makeFunction(name: "trainProjectBack").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let adam = library.makeFunction(name: "trainAdam2").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let gainKernel = library.makeFunction(name: "trainGainGrad").flatMap({ try? device.makeComputePipelineState(function: $0) })
         else { throw TrainError("Not enough GPU memory") }
+        memset(shBuffer.contents(), 0, shBuffer.length)
+        memset(m.contents(), 0, m.length)
+        memset(v.contents(), 0, v.length)
         let backDesc = MTLRenderPipelineDescriptor()
-        backDesc.vertexFunction = library.makeFunction(name: "gsVertexBack")
-        backDesc.fragmentFunction = library.makeFunction(name: "gsBackward")
+        backDesc.vertexFunction = library.makeFunction(name: "trainVertexBack")
+        backDesc.fragmentFunction = library.makeFunction(name: "trainBackward2")
         backDesc.colorAttachments[0].pixelFormat = .r32Float
         backDesc.colorAttachments[1].pixelFormat = .rgba32Float
         let backward = try device.makeRenderPipelineState(descriptor: backDesc)
-
-        // Zero optimiser state.
         if let cb = queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() {
-            for b in [grads, m, v] { blit.fill(buffer: b, range: 0..<b.length, value: 0) }
+            for b in [g2, grads] { blit.fill(buffer: b, range: 0..<b.length, value: 0) }
             blit.endEncoding()
             cb.commit()
             cb.waitUntilCompleted()
         }
         var count32 = UInt32(n)
+        var shFlag: UInt32 = opt.angleColour ? 1 : 0
         func encodeBuild(_ cb: MTLCommandBuffer) {
             guard let enc = cb.makeComputeCommandEncoder() else { return }
             enc.setComputePipelineState(build)
             enc.setBuffer(paramBuffer, offset: 0, index: 0)
             enc.setBuffer(renderBuffer, offset: 0, index: 1)
-            enc.setBytes(&count32, length: 4, index: 2)
+            enc.setBuffer(shBuffer, offset: 0, index: 2)
+            enc.setBytes(&count32, length: 4, index: 3)
+            enc.setBytes(&shFlag, length: 4, index: 4)
             enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
             enc.endEncoding()
         }
         if let cb = queue.makeCommandBuffer() { encodeBuild(cb); cb.commit(); cb.waitUntilCompleted() }
 
-        let positions = params.map { $0.position }
-        let splats = SplatData(count: n, buffer: renderBuffer, positions: positions)
+        let splats = SplatData(count: n, buffer: renderBuffer, positions: initial.map { $0.position })
+        if opt.angleColour { splats.sh = shBuffer }
         guard let renderer = GaussianSplatRenderer(device: device, splats: splats, colorFormat: .rgba16Float),
               renderer.sortedOrder != nil else { throw TrainError("GPU sort not available on this phone") }
         renderer.commandQueue = queue
@@ -145,42 +239,47 @@ final class PhoneTrainer: ObservableObject {
             self.state = .training
         }
 
-        func target(_ format: MTLPixelFormat) -> MTLTexture? {
+        func target(_ format: MTLPixelFormat, write: Bool = false) -> MTLTexture? {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: width, height: height, mipmapped: false)
-            d.usage = [.renderTarget, .shaderRead]
+            d.usage = write ? [.shaderWrite, .shaderRead] : [.renderTarget, .shaderRead]
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
         guard let rendered = target(.rgba16Float), let transmittance = target(.r32Float), let front = target(.rgba32Float),
-              let gainGrad = device.makeBuffer(length: 16, options: .storageModeShared),
-              let gainKernel = library.makeFunction(name: "trainGainGrad").flatMap({ try? device.makeComputePipelineState(function: $0) })
-        else {
+              let dLdC = target(.rgba32Float, write: true),
+              let gainGrad = device.makeBuffer(length: 16, options: .storageModeShared) else {
             throw TrainError("Not enough GPU memory")
         }
-        let noMask: MTLTexture? = {
+        let tiny: MTLTexture? = {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
             return device.makeTexture(descriptor: d)
         }()
-        // Per-frame exposure / colour gain (SplatForge: the biggest single error source on phone footage).
+        let noDepth: MTLTexture? = {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: 1, height: 1, mipmapped: false)
+            return device.makeTexture(descriptor: d)
+        }()
         var gains = [SIMD3<Float>](repeating: SIMD3(1, 1, 1), count: keyframes.count)
-
         var step: Float = 0
+
         for it in 0..<iterations {
             if stopRequested { break }
             if ProcessInfo.processInfo.thermalState == .serious { Thread.sleep(forTimeInterval: 0.03) }
             if ProcessInfo.processInfo.thermalState == .critical { Thread.sleep(forTimeInterval: 0.3) }
+            let progress = Float(it) / Float(max(iterations, 1))
             let kfIndex = Int.random(in: 0..<keyframes.count)
             let kf = keyframes[kfIndex]
-            let learnGain = it > iterations / 3
+            let learnGain = progress > 1.0 / 3.0
+            let moving = opt.movePositions && progress >= 0.3
+            let aniso = opt.flatSplats && progress >= 0.5
+            let shOn = opt.angleColour && progress >= 0.2
             memset(gainGrad.contents(), 0, 16)
             let projection = PhoneTrainer.projection(kf.intrinsics, width: Float(width), height: Float(height))
+            let cameraPos = kf.view.inverse.columns.3
 
-            // 1) parameters → render buffer (committed before the renderer's own sort command buffer).
             guard let buildCB = queue.makeCommandBuffer() else { break }
             encodeBuild(buildCB)
             buildCB.commit()
 
-            // 2) forward render, 3) backward pass, 4) Adam.
             guard let cb = queue.makeCommandBuffer() else { break }
             let fwd = MTLRenderPassDescriptor()
             fwd.colorAttachments[0].texture = rendered
@@ -189,6 +288,18 @@ final class PhoneTrainer: ObservableObject {
             fwd.colorAttachments[0].storeAction = .store
             if let enc = cb.makeRenderCommandEncoder(descriptor: fwd) {
                 renderer.draw(enc, view: kf.view, projection: projection, viewport: CGSize(width: width, height: height))
+                enc.endEncoding()
+            }
+            // dL/dC per pixel (L1, or L1 + SSIM).
+            if let enc = cb.makeComputeCommandEncoder() {
+                var gl = SIMD4<Float>(gains[kfIndex], opt.ssim ? 0.2 : 0)
+                enc.setComputePipelineState(lossK)
+                enc.setTexture(rendered, index: 0)
+                enc.setTexture(kf.texture, index: 1)
+                enc.setTexture(kf.mask ?? tiny, index: 2)
+                enc.setTexture(dLdC, index: 3)
+                enc.setBytes(&gl, length: 16, index: 0)
+                enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                 enc.endEncoding()
             }
             if let sorted = renderer.sortedOrder {
@@ -205,46 +316,65 @@ final class PhoneTrainer: ObservableObject {
                     var u = GSUniforms(view: kf.view, projection: projection,
                                        viewport: SIMD2<Float>(Float(width), Float(height)),
                                        focal: SIMD2<Float>(kf.intrinsics.x, kf.intrinsics.y))
-                    var tu = TrainUniforms(gain: SIMD4<Float>(gains[kfIndex], 1), gradScale: 1)
+                    u.cameraPos = cameraPos
+                    u.hasSH = opt.angleColour ? 1 : 0
                     enc.setRenderPipelineState(backward)
                     enc.setVertexBuffer(renderBuffer, offset: 0, index: 0)
                     enc.setVertexBuffer(sorted.order, offset: 0, index: 1)
                     enc.setVertexBytes(&u, length: MemoryLayout<GSUniforms>.stride, index: 2)
-                    enc.setVertexBuffer(renderBuffer, offset: 0, index: 3)
+                    enc.setVertexBuffer(opt.angleColour ? shBuffer : renderBuffer, offset: 0, index: 3)
                     enc.setVertexBuffer(sorted.args, offset: 0, index: 4)
                     enc.setFragmentTexture(rendered, index: 0)
-                    enc.setFragmentTexture(kf.texture, index: 1)
-                    enc.setFragmentTexture(kf.mask ?? noMask, index: 2)
-                    enc.setFragmentBuffer(grads, offset: 0, index: 0)
-                    enc.setFragmentBytes(&tu, length: MemoryLayout<TrainUniforms>.stride, index: 1)
+                    enc.setFragmentTexture(dLdC, index: 1)
+                    enc.setFragmentBuffer(g2, offset: 0, index: 0)
                     enc.drawPrimitives(type: .triangleStrip, indirectBuffer: sorted.args, indirectBufferOffset: 0)
                     enc.endEncoding()
                 }
+            }
+            if let enc = cb.makeComputeCommandEncoder() {
+                var tu = Train2Uniforms(view: kf.view, focal: SIMD2(kf.intrinsics.x, kf.intrinsics.y),
+                                        viewport: SIMD2(Float(width), Float(height)),
+                                        principal: SIMD2(kf.intrinsics.z, kf.intrinsics.w),
+                                        cameraPos: cameraPos,
+                                        depthWeight: (opt.lidarDepth && moving) ? 1.0 : 0,
+                                        movePositions: moving ? 1 : 0, anisotropic: aniso ? 1 : 0,
+                                        useSH: shOn ? 1 : 0, count: UInt32(n))
+                enc.setComputePipelineState(projBack)
+                enc.setBuffer(paramBuffer, offset: 0, index: 0)
+                enc.setBuffer(g2, offset: 0, index: 1)
+                enc.setBuffer(grads, offset: 0, index: 2)
+                enc.setBytes(&tu, length: MemoryLayout<Train2Uniforms>.stride, index: 3)
+                enc.setTexture(kf.depth ?? noDepth, index: 0)
+                enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                enc.endEncoding()
             }
             if learnGain, let enc = cb.makeComputeCommandEncoder() {
                 var tu = TrainUniforms(gain: SIMD4<Float>(gains[kfIndex], 1), gradScale: 1)
                 enc.setComputePipelineState(gainKernel)
                 enc.setTexture(rendered, index: 0)
                 enc.setTexture(kf.texture, index: 1)
-                enc.setTexture(kf.mask ?? noMask, index: 2)
+                enc.setTexture(kf.mask ?? tiny, index: 2)
                 enc.setBuffer(gainGrad, offset: 0, index: 0)
                 enc.setBytes(&tu, length: MemoryLayout<TrainUniforms>.stride, index: 1)
                 enc.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                 enc.endEncoding()
             }
             step += 1
-            // Learning rates decay to 30 % over the run.
-            let decay = 1 - 0.7 * Float(it) / Float(max(iterations, 1))
-            var a = AdamUniforms(lrColor: 0.01 * decay, lrOpacity: 0.05 * decay, lrScale: 0.005 * decay,
-                                 beta1: 0.9, beta2: 0.999, eps: 1e-8,
-                                 bias1: 1 - pow(0.9, step), bias2: 1 - pow(0.999, step), count: UInt32(n))
+            let decay = 1 - 0.7 * progress
+            // Positions: SplatForge's schedule, 1.6e-4 × scene size, decaying exponentially to 1 % at the end.
+            let posLR = moving ? 1.6e-4 * extent * pow(0.01, (progress - 0.3) / 0.7) : 0
+            var a = Adam2Uniforms(lrPos: posLR, lrColor: 0.01 * decay, lrOpacity: 0.05 * decay, lrScale: 0.005 * decay,
+                                  lrRot: aniso ? 0.002 * decay : 0, lrSH: shOn ? 0.001 * decay : 0,
+                                  beta1: 0.9, beta2: 0.999, eps: 1e-8,
+                                  bias1: 1 - pow(0.9, step), bias2: 1 - pow(0.999, step),
+                                  count: UInt32(n), anisotropic: aniso ? 1 : 0)
             if let enc = cb.makeComputeCommandEncoder() {
                 enc.setComputePipelineState(adam)
                 enc.setBuffer(paramBuffer, offset: 0, index: 0)
                 enc.setBuffer(grads, offset: 0, index: 1)
                 enc.setBuffer(m, offset: 0, index: 2)
                 enc.setBuffer(v, offset: 0, index: 3)
-                enc.setBytes(&a, length: MemoryLayout<AdamUniforms>.stride, index: 4)
+                enc.setBytes(&a, length: MemoryLayout<Adam2Uniforms>.stride, index: 4)
                 enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
                 enc.endEncoding()
             }
@@ -254,17 +384,21 @@ final class PhoneTrainer: ObservableObject {
                 let g = gainGrad.contents().bindMemory(to: Float.self, capacity: 4)
                 if g[3] > 100 {
                     let mean = SIMD3<Float>(g[0], g[1], g[2]) / g[3]
-                    // Small step on the mean sign error, gently pulled back to 1 (tiny L2).
                     gains[kfIndex] = simd_clamp(gains[kfIndex] - 0.02 * mean + 0.002 * (SIMD3(1, 1, 1) - gains[kfIndex]),
                                                 SIMD3(repeating: 0.5), SIMD3(repeating: 2))
                 }
+            }
+            // Relocation (MCMC-style): every 100 steps between 10 % and 80 %, nearly transparent splats move onto
+            // copies of visible ones (opacity split between the two), so detail grows where it is needed.
+            if opt.relocate, it % 100 == 99, progress > 0.1, progress < 0.8 {
+                PhoneTrainer.relocate(params: paramBuffer, m: m, v: v, count: n)
             }
             if it % 25 == 0 { DispatchQueue.main.async { self.iteration = it } }
         }
         if let cb = queue.makeCommandBuffer() { encodeBuild(cb); cb.commit(); cb.waitUntilCompleted() }
         publish(.loading("Saving phone_splat.ply…"))
-        let trained = paramBuffer.contents().bindMemory(to: TrainParams.self, capacity: n)
-        try PhoneTrainer.writePLY(Array(UnsafeBufferPointer(start: trained, count: n)), to: outputURL)
+        let trained = paramBuffer.contents().bindMemory(to: Float.self, capacity: n * P)
+        try PhoneTrainer.writePLY(trained, count: n, withSH: opt.angleColour, to: outputURL)
         let done = iteration
         DispatchQueue.main.async {
             self.iteration = max(done, self.iterations)
@@ -272,10 +406,46 @@ final class PhoneTrainer: ObservableObject {
         }
     }
 
+    /// Moves up to 5 % of the splats with opacity < 0.5 % onto copies of opaque ones, sampled by opacity. Both copies
+    /// get opacity 1 − √(1 − o) (together they look like the original); the copy is nudged inside the splat's own
+    /// footprint so the two can separate. Their optimiser state is reset.
+    private static func relocate(params: MTLBuffer, m: MTLBuffer, v: MTLBuffer, count n: Int) {
+        let P = PhoneTrainer.P
+        let p = params.contents().bindMemory(to: Float.self, capacity: n * P)
+        let mm = m.contents().bindMemory(to: Float.self, capacity: n * P)
+        let vv = v.contents().bindMemory(to: Float.self, capacity: n * P)
+        func opacity(_ i: Int) -> Float { 1 / (1 + exp(-p[i * P + 6])) }
+        var dead: [Int] = []
+        var alive: [Int] = []
+        var cumulative: [Float] = []
+        var total: Float = 0
+        for i in 0..<n {
+            let o = opacity(i)
+            if o < 0.005 { dead.append(i) } else { alive.append(i); total += o; cumulative.append(total) }
+        }
+        guard !dead.isEmpty, !alive.isEmpty, total > 0 else { return }
+        dead.shuffle()
+        for d in dead.prefix(max(n / 20, 1)) {
+            let r = Float.random(in: 0..<total)
+            var lo = 0, hi = cumulative.count - 1
+            while lo < hi { let mid = (lo + hi) / 2; if cumulative[mid] < r { lo = mid + 1 } else { hi = mid } }
+            let s = alive[lo]
+            let o = opacity(s)
+            let newO = min(max(1 - sqrt(max(1 - o, 0)), 0.006), 0.99)
+            let logit = log(newO / (1 - newO))
+            for k in 0..<P { p[d * P + k] = p[s * P + k] }
+            p[s * P + 6] = logit
+            p[d * P + 6] = logit
+            let sigma = exp((p[s * P + 7] + p[s * P + 8] + p[s * P + 9]) / 3)
+            for k in 0..<3 { p[d * P + k] += Float.random(in: -1...1) * sigma * 0.5 }
+            for k in 0..<P { mm[d * P + k] = 0; vv[d * P + k] = 0; mm[s * P + k] = 0; vv[s * P + k] = 0 }
+        }
+    }
+
     // MARK: - Data
 
     private func loadKeyframes(scan: ScanData, frames: [ScanData.Pose], width: Int, height: Int,
-                               device: MTLDevice) throws -> ([Keyframe], [Int: CGImage]) {
+                               device: MTLDevice, withDepth: Bool = false) throws -> ([Keyframe], [Int: CGImage]) {
         let asset = AVURLAsset(url: folder.appendingPathComponent("rgb.mp4"))
         let generator = AVAssetImageGenerator(asset: asset)
         generator.requestedTimeToleranceBefore = .zero
@@ -295,13 +465,33 @@ final class PhoneTrainer: ObservableObject {
             let maskURL = folder.appendingPathComponent("masks").appendingPathComponent(String(format: "%06d.png", pose.frame))
             let mask = FileManager.default.fileExists(atPath: maskURL.path)
                 ? try? loader.newTexture(URL: maskURL, options: [.SRGB: false, .textureStorageMode: MTLStorageMode.private.rawValue]) : nil
-            keyframes.append(Keyframe(texture: texture, mask: mask, view: pose.arkitCameraToWorld.inverse,
+            keyframes.append(Keyframe(texture: texture, mask: mask,
+                                      depth: withDepth ? lidarTexture(frame: pose.frame, device: device) : nil,
+                                      view: pose.arkitCameraToWorld.inverse,
                                       intrinsics: SIMD4(pose.intrinsics.x * sx, pose.intrinsics.y * sy,
                                                         pose.intrinsics.z * sx, pose.intrinsics.w * sy)))
             images[pose.frame] = image
         }
         guard keyframes.count >= 8 else { throw TrainError("Could not decode the video frames") }
         return (keyframes, images)
+    }
+
+    /// The frame's LiDAR depth in metres (r32Float, sensor orientation like the video), low-confidence pixels = 0.
+    private func lidarTexture(frame: Int, device: MTLDevice) -> MTLTexture? {
+        let name = String(format: "%06d.png", frame)
+        guard let depth = DepthPNG.load(folder.appendingPathComponent("depth").appendingPathComponent(name)) else { return nil }
+        let conf = PhoneTrainer.gray(folder.appendingPathComponent("confidence").appendingPathComponent(name))
+        var metres = [Float](repeating: 0, count: depth.width * depth.height)
+        for i in 0..<metres.count {
+            if let c = conf, c.count == metres.count, c[i] < 2 { continue }
+            metres[i] = Float(depth.mm[i]) / 1000
+        }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: depth.width, height: depth.height, mipmapped: false)
+        d.usage = [.shaderRead]
+        guard let texture = device.makeTexture(descriptor: d) else { return nil }
+        texture.replace(region: MTLRegionMake2D(0, 0, depth.width, depth.height), mipmapLevel: 0,
+                        withBytes: metres, bytesPerRow: depth.width * 4)
+        return texture
     }
 
     /// One splat per 1.5 cm voxel of confident LiDAR depth, coloured from the frame it was seen in.
@@ -389,26 +579,31 @@ final class PhoneTrainer: ObservableObject {
         return maxValue > 2 ? data.map { UInt8(Int($0) * 2 / Int(maxValue)) } : data
     }
 
-    /// Standard 3DGS PLY (x y z, normals, f_dc, opacity, scale, rot), ARKit world coordinates (y up).
-    static func writePLY(_ params: [TrainParams], to url: URL) throws {
+    /// Standard 3DGS PLY (x y z, normals, f_dc, f_rest for SH degree 1, opacity, scale, rot), ARKit world (y up).
+    static func writePLY(_ p: UnsafeMutablePointer<Float>, count n: Int, withSH: Bool, to url: URL) throws {
+        let P = PhoneTrainer.P
         let c0: Float = 0.28209479177387814
-        let kept = params.filter { $0.opacityLogit > -4.5 }
+        let kept = (0..<n).filter { p[$0 * P + 6] > -4.5 }
+        var names = ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"]
+        if withSH { names += (0..<9).map { "f_rest_\($0)" } }
+        names += ["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
         var header = "ply\nformat binary_little_endian 1.0\nelement vertex \(kept.count)\n"
-        for name in ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
-                     "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"] {
-            header += "property float \(name)\n"
-        }
+        for name in names { header += "property float \(name)\n" }
         header += "end_header\n"
         var data = Data(header.utf8)
-        var row = [Float](repeating: 0, count: 17)
-        data.reserveCapacity(data.count + kept.count * 68)
-        for p in kept {
-            row[0] = p.position.x; row[1] = p.position.y; row[2] = p.position.z
-            row[3] = 0; row[4] = 0; row[5] = 0
-            row[6] = (p.rgb.x - 0.5) / c0; row[7] = (p.rgb.y - 0.5) / c0; row[8] = (p.rgb.z - 0.5) / c0
-            row[9] = p.opacityLogit
-            row[10] = p.logScale; row[11] = p.logScale; row[12] = p.logScale
-            row[13] = 1; row[14] = 0; row[15] = 0; row[16] = 0
+        var row = [Float](repeating: 0, count: names.count)
+        data.reserveCapacity(data.count + kept.count * names.count * 4)
+        for i in kept {
+            let q = p + i * P
+            var k = 0
+            func put(_ value: Float) { row[k] = value; k += 1 }
+            put(q[0]); put(q[1]); put(q[2]); put(0); put(0); put(0)
+            put((q[3] - 0.5) / c0); put((q[4] - 0.5) / c0); put((q[5] - 0.5) / c0)
+            if withSH {
+                // f_rest is channel-major (R coefficients 1-3, then G, then B); our buffer is coefficient-major.
+                for ch in 0..<3 { for coeff in 0..<3 { put(q[14 + coeff * 3 + ch]) } }
+            }
+            put(q[6]); put(q[7]); put(q[8]); put(q[9]); put(q[10]); put(q[11]); put(q[12]); put(q[13])
             row.withUnsafeBytes { data.append(contentsOf: $0) }
         }
         try data.write(to: url, options: .atomic)
@@ -495,6 +690,15 @@ struct ScanData {
 struct PhoneTrainView: View {
     @StateObject private var trainer: PhoneTrainer
     @State private var viewing: SplatSource?
+    @State private var showingOptions = false
+    @AppStorage(PhoneTrainOptions.moveKey) private var optMove = true
+    @AppStorage(PhoneTrainOptions.flatKey) private var optFlat = true
+    @AppStorage(PhoneTrainOptions.depthKey) private var optDepth = true
+    @AppStorage(PhoneTrainOptions.ssimKey) private var optSSIM = true
+    @AppStorage(PhoneTrainOptions.relocateKey) private var optRelocate = true
+    @AppStorage(PhoneTrainOptions.shKey) private var optSH = true
+    @AppStorage(PhoneTrainOptions.resolutionKey) private var optWidth = 720
+    @AppStorage(PhoneTrainOptions.lengthKey) private var optLength = 7000
     @Environment(\.dismiss) private var dismiss
 
     init(folder: URL) {
@@ -523,8 +727,18 @@ struct PhoneTrainView: View {
                         Text("\(trainer.splatCount.formatted()) splats · step \(trainer.iteration) / \(trainer.iterations)")
                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     }
-                    Text("Splats sit on the LiDAR points; the phone learns their colour, opacity and size from the sharpest frames. A quick preview of the scan, no PC needed — SplatForge still makes the final splat.")
+                    Text(training ? trainer.options.summary : PhoneTrainOptions.load().summary)
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("Splats start on the LiDAR points and learn from the sharpest frames. A preview on the phone, no PC needed — SplatForge still makes the final splat.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if !training {
+                        Button {
+                            showingOptions = true
+                        } label: {
+                            Label("Training options", systemImage: "slider.horizontal.3")
+                        }
+                        .padding(.top, 2)
+                    }
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -564,6 +778,59 @@ struct PhoneTrainView: View {
             trainer.stop()
         }
         .fullScreenCover(item: $viewing) { SplatViewerScreen(source: $0) }
+        .sheet(isPresented: $showingOptions) { optionsSheet }
+    }
+
+    private var training: Bool {
+        if case .training = trainer.state { return true }
+        if case .loading = trainer.state { return true }
+        return false
+    }
+
+    /// Every improvement can be turned off on its own (owner 2026-11-25); all off = the first, simple trainer.
+    private var optionsSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Toggle("Let splats move", isOn: $optMove)
+                    Toggle("Flat and stretched splats", isOn: $optFlat)
+                    Toggle("Keep splats on the LiDAR surface", isOn: $optDepth)
+                        .disabled(!optMove)
+                    Toggle("Sharper texture (SSIM)", isOn: $optSSIM)
+                    Toggle("Move weak splats to missing detail", isOn: $optRelocate)
+                    Toggle("Colour changes with angle", isOn: $optSH)
+                } footer: {
+                    Text("Moving starts after 30 % of the steps, flat splats after 50 %. The LiDAR option only works while splats move. Turn everything off for the old quick trainer.")
+                }
+                Section("Quality") {
+                    Picker("Frame size", selection: $optWidth) {
+                        Text("480 px (faster)").tag(480)
+                        Text("720 px (sharper)").tag(720)
+                    }
+                    Picker("Length", selection: $optLength) {
+                        Text("Quick · 3 000 steps").tag(3000)
+                        Text("Better · 7 000 steps").tag(7000)
+                        Text("Best · 15 000 steps").tag(15000)
+                    }
+                }
+                Section {
+                    Button("All on (recommended)") {
+                        optMove = true; optFlat = true; optDepth = true; optSSIM = true; optRelocate = true; optSH = true
+                        optWidth = 720; optLength = 7000
+                    }
+                    Button("All off (old quick trainer)") {
+                        optMove = false; optFlat = false; optDepth = false; optSSIM = false; optRelocate = false; optSH = false
+                        optWidth = 480; optLength = 3000
+                    }
+                }
+            }
+            .navigationTitle("Training options")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { showingOptions = false } }
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 
     private var statusText: String {

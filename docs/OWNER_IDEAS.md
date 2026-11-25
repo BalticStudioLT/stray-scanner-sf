@@ -68,3 +68,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-25 10:49 "phone wants to sleep while uploading splat. add resume button. also does mobile splat generator has all improvements from a dekstop?"
 - 2026-11-25 10:50 [screenshot: Train on phone "Could not train: Too little LiDAR depth in this scan"] "And what is this" → two bugs: depth PNGs were colour-converted when read (0.98 m read as a few mm) and at fps divider >1 keyframes got pictures from the wrong time; both fixed
 - 2026-11-25 11:13 "can phone do better splat?"
+- 2026-11-25 11:15 "add all but make all as options" (phone trainer v2: move/stretch/rotate, LiDAR depth loss, SSIM, MCMC relocation, 720 px + longer + SH1 — each as an option)
