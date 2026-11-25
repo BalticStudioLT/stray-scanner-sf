@@ -8,6 +8,7 @@
 
 import SwiftUI
 import PhotosUI
+import Photos
 import AVKit
 
 /// A video ready in the inbox, waiting for the owner's choice.
@@ -249,7 +250,32 @@ struct ImmichBrowserView: View {
 
 /// Copies a video chosen in the Photos picker into the app and hands it on.
 enum PhotosVideoLoader {
+    /// Writes the asset's original video to the inbox. nil when the app may not read the library.
+    static func original(_ id: String) async throws -> URL? {
+        var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .notDetermined { status = await PHPhotoLibrary.requestAuthorization(for: .readWrite) }
+        guard status == .authorized || status == .limited,
+              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return nil }
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = resources.first(where: { $0.type == .fullSizeVideo })
+                ?? resources.first(where: { $0.type == .video }) else { return nil }
+        let ext = (resource.originalFilename as NSString).pathExtension.lowercased()
+        let url = VideoInbox.folder.appendingPathComponent(String(UUID().uuidString.prefix(8)) + "." + (ext.isEmpty ? "mov" : ext))
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true     // iCloud Photos with "Optimise storage"
+        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
+                if let error = error { done.resume(throwing: error) } else { done.resume() }
+            }
+        }
+        return url
+    }
+
     static func load(_ item: PhotosPickerItem) async throws -> PendingVideo {
+        // Best path: the original file straight from the library (also downloads iCloud-only videos).
+        if let id = item.itemIdentifier, let url = try await original(id) {
+            return PendingVideo(url: url, title: "Video from Photos")
+        }
         // Photos videos are QuickTime or MPEG-4; ask for the movie file itself.
         if let movie = try await item.loadTransferable(type: PickedMovie.self) {
             return PendingVideo(url: movie.url, title: "Video from Photos")
