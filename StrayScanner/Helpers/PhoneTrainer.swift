@@ -553,24 +553,35 @@ final class PhoneTrainer: ObservableObject {
                     if out.count >= maxSplats { break }
                 }
             }
-            // Sparse points: grow each into a few jittered copies inside its own footprint, so there are enough splats
-            // for detail (relocation then moves them where the photos need them).
-            let sized = PhoneTrainer.nnScales(out, voxel: max(voxel, 0.03))
-            guard !sized.isEmpty else { return sized }
-            let copies = min(20, max(1, 150_000 / sized.count))
-            var grown: [TrainParams] = []
-            grown.reserveCapacity(sized.count * copies)
-            for t in sized {
-                grown.append(t)
-                let sigma = exp(t.logScale)
-                for _ in 1..<copies {
-                    var c = t
-                    c.position += SIMD3<Float>(Float.random(in: -1...1), Float.random(in: -1...1), Float.random(in: -1...1)) * sigma
-                    c.logScale = log(sigma * 0.6)
-                    grown.append(c)
+            // The alignment gives only a few hundred points — far too few to cover a room. Fill each keyframe's view
+            // with splats at about that camera's typical distance to the points (coloured from the frame); training
+            // and relocation then pull them onto the real surfaces.
+            let sparse = PhoneTrainer.nnScales(out, voxel: max(voxel, 0.03))
+            var fill: [TrainParams] = []
+            let perFrame = max(200, min(4000, (maxSplats / 2) / max(frames.count, 1)))
+            let sx = Float(width) / scan.videoWidth
+            for pose in frames {
+                guard let image = images[pose.frame], let pixels = PhoneTrainer.rgba(image) else { continue }
+                let worldToCam = pose.cvCameraToWorld.inverse
+                var depths: [Float] = []
+                for t in sparse {
+                    let c = worldToCam * SIMD4<Float>(t.position, 1)
+                    if c.z > 0.05 { depths.append(c.z) }
+                }
+                depths.sort()
+                let typical = depths.isEmpty ? 2 : depths[depths.count / 2]
+                let k = pose.intrinsics * SIMD4(sx, sx, sx, sx)
+                for _ in 0..<perFrame {
+                    let u = Float.random(in: 0..<Float(width)), v = Float.random(in: 0..<Float(height))
+                    let d = typical * exp(Float.random(in: -0.4...0.4))
+                    let w4 = pose.cvCameraToWorld * SIMD4<Float>((u - k.z) / k.x * d, (v - k.w) / k.y * d, d, 1)
+                    let o = (min(Int(v), height - 1) * width + min(Int(u), width - 1)) * 4
+                    let rgb = SIMD3<Float>(Float(pixels[o]), Float(pixels[o + 1]), Float(pixels[o + 2])) / 255
+                    fill.append(TrainParams(rgb: rgb, opacityLogit: -2.2, logScale: log(d / k.x * 4),
+                                            position: SIMD3(w4.x, w4.y, w4.z)))
                 }
             }
-            return Array(grown.prefix(maxSplats))
+            return Array((sparse + fill).prefix(maxSplats))
         }
         for pose in frames {
             guard let image = images[pose.frame], let pixels = PhoneTrainer.rgba(image),

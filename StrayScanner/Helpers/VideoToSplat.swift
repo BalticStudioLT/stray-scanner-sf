@@ -563,7 +563,7 @@ final class PhoneVideoAligner: ObservableObject {
         try binary.write(to: folder.appendingPathComponent("points.bin"))
         let settings: [String: Any] = ["source": "phone_aligned_video", "video_width": Int(w), "video_height": Int(h),
                                        "frames_dir": "frames", "aligned_frames": found.posesBySample.count,
-                                       "frames_taken": times.count, "points": points.count, "scale_to_metres": scale,
+                                       "frames_taken": times.count, "video_fps": Double(times.count) / duration, "points": points.count, "scale_to_metres": scale,
                                        "alignment": "RealityKit PhotogrammetrySession (on the phone)", "video_frame_offset": 0]
         let json = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
         try json.write(to: folder.appendingPathComponent("capture_settings.json"))
