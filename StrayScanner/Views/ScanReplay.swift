@@ -10,6 +10,7 @@
 import SwiftUI
 import AVKit
 import simd
+import ImageIO
 
 enum ReplayView: String, CaseIterable, Identifiable {
     case camera, depth, confidence, map
@@ -130,6 +131,9 @@ final class ScanReplayModel: ObservableObject {
         }
         if let fps = json["video_fps"] as? Double, fps > 0 { videoFPS = fps }
         else if let fps = json["video_fps"] as? Int, fps > 0 { videoFPS = Double(fps) }
+        // rgb.mp4 timestamps count camera frames; only every fps_divider-th one is saved, so saved frames are
+        // fps/divider apart in time (before this, scans at 5 fps showed the wrong picture for each frame).
+        if let divider = json["fps_divider"] as? Int, divider > 1 { videoFPS /= Double(divider) }
         frameOffset = json["video_frame_offset"] == nil ? 1 : 0
         if let w = json["video_width"] as? Int, w > 0 { rgbWidth = Float(w) }
     }
@@ -267,15 +271,46 @@ final class ScanReplayModel: ObservableObject {
 enum DepthPNG {
     struct Depth { let width: Int; let height: Int; let mm: [UInt16] }
 
+    /// Reads the stored millimetres exactly. (2026-11-25: drawing the PNG into a CGContext colour-converted the
+    /// values — the untagged gray PNG was taken as gamma-encoded — so 0.98 m came back as a few millimetres:
+    /// "Too little LiDAR depth" in Train here, and a nearly black depth view.)
     static func load(_ url: URL) -> Depth? {
-        guard let image = UIImage(contentsOfFile: url.path)?.cgImage else { return nil }
-        let w = image.width, h = image.height
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return nil }
+        let w = image.width, h = image.height, row = image.bytesPerRow
+        let channels = max(image.bitsPerPixel / max(image.bitsPerComponent, 1), 1)
+        guard CFDataGetLength(data) >= row * h else { return nil }
         var mm = [UInt16](repeating: 0, count: w * h)
-        guard let space = CGColorSpace(name: CGColorSpace.linearGray),
-              let ctx = CGContext(data: &mm, width: w, height: h, bitsPerComponent: 16, bytesPerRow: w * 2, space: space,
-                                  bitmapInfo: CGImageAlphaInfo.none.rawValue | CGBitmapInfo.byteOrder16Little.rawValue) else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        if image.bitsPerComponent == 16 {
+            let little = image.bitmapInfo.contains(.byteOrder16Little)
+            for y in 0..<h {
+                let line = bytes + y * row
+                for x in 0..<w {
+                    let o = x * 2 * channels
+                    mm[y * w + x] = little ? UInt16(line[o]) | UInt16(line[o + 1]) << 8 : UInt16(line[o]) << 8 | UInt16(line[o + 1])
+                }
+            }
+        } else if image.bitsPerComponent == 8 {
+            for y in 0..<h { for x in 0..<w { mm[y * w + x] = UInt16(bytes[y * row + x * channels]) } }
+        } else {
+            return nil
+        }
         return Depth(width: w, height: h, mm: mm)
+    }
+
+    /// 8-bit gray values exactly as stored (confidence 0/1/2, masks 0/255), no colour conversion.
+    static func rawGray(_ url: URL) -> (width: Int, height: Int, values: [UInt8])? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
+              image.bitsPerComponent == 8,
+              let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return nil }
+        let w = image.width, h = image.height, row = image.bytesPerRow
+        let channels = max(image.bitsPerPixel / 8, 1)
+        guard CFDataGetLength(data) >= row * h else { return nil }
+        var out = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h { for x in 0..<w { out[y * w + x] = bytes[y * row + x * channels] } }
+        return (w, h, out)
     }
 
     static func colorize(_ d: Depth, maxMetres: Float = 5) -> UIImage? {
@@ -290,12 +325,9 @@ enum DepthPNG {
     }
 
     static func loadConfidence(_ url: URL) -> UIImage? {
-        guard let image = UIImage(contentsOfFile: url.path)?.cgImage else { return nil }
-        let w = image.width, h = image.height
-        var raw = [UInt8](repeating: 0, count: w * h)
-        guard let ctx = CGContext(data: &raw, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
-                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let gray = rawGray(url) else { return nil }
+        let w = gray.width, h = gray.height
+        let raw = gray.values
         // Stored as 0/1/2 (low/medium/high). Some exports scale to 0..255 — accept both.
         let maxValue = raw.max() ?? 2
         var rgba = [UInt8](repeating: 255, count: w * h * 4)

@@ -65,11 +65,22 @@ struct SessionDetailView: View {
             header
 
             if let status = pcStatus {
-                VStack(spacing: 6) {
+                VStack(spacing: 8) {
                     if let progress = pcProgress {
                         ProgressView(value: progress)
                     }
                     Text(status).font(.caption).foregroundStyle(.secondary)
+                    if canResume {
+                        Button {
+                            if let folder = recording.directoryPath() { PCUploader.shared.restart(directory: folder) }
+                            pcStatus = "Starting again…"
+                            pcProgress = 0
+                        } label: {
+                            Label(uploading ? "Restart upload" : "Resume upload", systemImage: "arrow.clockwise")
+                                .frame(maxWidth: .infinity, minHeight: 32)
+                        }
+                        .glassButton(prominent: !uploading)
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 10)
@@ -99,7 +110,7 @@ struct SessionDetailView: View {
                         .frame(maxWidth: .infinity, minHeight: 32)
                 }
                 .glassButton()
-                .disabled(pcProgress != nil)
+                .disabled(uploading)
 
                 if let folder = folder {
                     NavigationLink(destination: ScanReplayView(folder: folder)) {
@@ -151,6 +162,12 @@ struct SessionDetailView: View {
             pcProgress = note.userInfo?["progress"] as? Double
         }
         .onAppear {
+            if pcStatus == nil, let last = PCUploader.shared.lastStatus[scanName] {
+                pcProgress = last.0
+                pcStatus = last.1
+            } else if pcStatus == nil, PCUploader.uploadFailed(scanName) {
+                pcStatus = "The last upload did not finish."
+            }
             guard summary == nil else { return }
             let directory = recording.directoryPath()
             DispatchQueue.global(qos: .utility).async {
@@ -273,6 +290,14 @@ struct SessionDetailView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .font(.subheadline.monospacedDigit())
+    }
+
+    private var scanName: String { recording.directoryPath()?.lastPathComponent ?? "" }
+    private var uploading: Bool { PCUploader.shared.isActive(scanName) }
+    /// A failed/stopped upload can be resumed; a running one that seems stuck can be restarted.
+    private var canResume: Bool {
+        if PCUploader.uploadFailed(scanName) { return true }
+        return uploading && (pcStatus?.hasPrefix("Uploading") ?? false)
     }
 
     func sendToPC() {

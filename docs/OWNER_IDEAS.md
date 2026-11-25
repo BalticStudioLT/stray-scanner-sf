@@ -65,3 +65,5 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-25 01:09 [screenshot: PC link sheet, host coolmaster4.tailc6292e.ts.net, port 8777, token filled] "Cant connect" → checked from the Mac: PC is on Tailscale and answers ping, the new iPhone is on the tailnet, but nothing listens on 8777/8778 = SplatForge Studio is not running on the PC (start A:\AI\SplatForge\studio.bat)
 - 2026-11-25 01:15 [screenshot: Splats tab scrolled to the bottom, shows the Jobs list] "I cant see scan at the bottom" → the splat list had moved to the top of the tab; jobs list was pushing everything else away
 - 2026-11-25 10:42 "finish it"
+- 2026-11-25 10:49 "phone wants to sleep while uploading splat. add resume button. also does mobile splat generator has all improvements from a dekstop?"
+- 2026-11-25 10:50 [screenshot: Train on phone "Could not train: Too little LiDAR depth in this scan"] "And what is this" → two bugs: depth PNGs were colour-converted when read (0.98 m read as a few mm) and at fps divider >1 keyframes got pictures from the wrong time; both fixed

@@ -384,11 +384,7 @@ final class PhoneTrainer: ObservableObject {
     }
 
     static func gray(_ url: URL) -> [UInt8]? {
-        guard let image = UIImage(contentsOfFile: url.path)?.cgImage else { return nil }
-        var data = [UInt8](repeating: 0, count: image.width * image.height)
-        guard let ctx = CGContext(data: &data, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width,
-                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard let data = DepthPNG.rawGray(url)?.values else { return nil }
         let maxValue = data.max() ?? 2
         return maxValue > 2 ? data.map { UInt8(Int($0) * 2 / Int(maxValue)) } : data
     }
@@ -477,6 +473,9 @@ struct ScanData {
             if let x = json["video_height"] as? Int { h = Float(x) }
             if let x = json["video_fps"] as? Double { fps = x } else if let x = json["video_fps"] as? Int { fps = Double(x) }
             if json["video_frame_offset"] != nil { offset = 0 }
+            // rgb.mp4 timestamps count camera frames; saved frame k is camera frame k × fps_divider.
+            // (Before: at 5 fps every keyframe got a picture from the first tenth of the video.)
+            if let divider = json["fps_divider"] as? Int, divider > 1 { fps /= Double(divider) }
         }
         videoWidth = w; videoHeight = h; self.fps = fps; frameOffset = offset
     }

@@ -123,21 +123,83 @@ struct PCLinkSettings {
 
 // MARK: - Upload
 
-final class PCUploader: NSObject, URLSessionTaskDelegate {
+final class PCUploader: NSObject, URLSessionDataDelegate {
     static let shared = PCUploader()
+    static let backgroundIdentifier = "lt.nuskenuota.strayscanner.upload"
+    /// Given by iOS when it wakes the app for finished background uploads (AppDelegate); called once they are handled.
+    var backgroundCompletion: (() -> Void)?
 
     /// Called on the main queue: (scan folder name, progress 0…1 or nil when finished, message).
     var onUpdate: ((String, Double?, String) -> Void)?
     private(set) var activeScans = Set<String>()
+    /// Background session (owner 2026-11-25: "phone wants to sleep while uploading"): iOS keeps sending the file
+    /// while the phone is locked or the app is closed, and retries when the network comes back.
     private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 120
-        configuration.timeoutIntervalForResource = 6 * 3600
-        configuration.waitsForConnectivity = true
+        let configuration = URLSessionConfiguration.background(withIdentifier: PCUploader.backgroundIdentifier)
+        configuration.sessionSendsLaunchEvents = true
+        configuration.isDiscretionary = false
+        configuration.timeoutIntervalForResource = 12 * 3600
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
     private var names: [Int: String] = [:]
+    private var responses: [Int: Data] = [:]
+    private var followers: [Int: (() -> Void)?] = [:]
     private let lock = NSLock()
+    /// Last progress per scan, so a scan page opened later shows it.
+    private(set) var lastStatus: [String: (Double?, String)] = [:]
+
+    /// Reconnects to uploads iOS is still running from an earlier launch (call at start).
+    func reconnect() {
+        session.getAllTasks { tasks in
+            for task in tasks {
+                guard let name = task.taskDescription else { continue }
+                self.lock.lock()
+                self.names[task.taskIdentifier] = name
+                self.activeScans.insert(name)
+                self.lock.unlock()
+                self.report(name, 0, "Uploading (continued in the background)…")
+            }
+        }
+    }
+
+    /// Scans whose upload failed or was stopped; the scan page offers "Resume upload".
+    private static let failedKey = "PCUploadFailedScans"
+    static func uploadFailed(_ name: String) -> Bool {
+        return (UserDefaults.standard.stringArray(forKey: failedKey) ?? []).contains(name)
+    }
+    private static func setFailed(_ name: String, _ failed: Bool) {
+        var list = UserDefaults.standard.stringArray(forKey: failedKey) ?? []
+        list.removeAll { $0 == name }
+        if failed { list.append(name) }
+        UserDefaults.standard.set(list, forKey: failedKey)
+    }
+
+    func isActive(_ name: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeScans.contains(name)
+    }
+
+    /// Stops a running upload and starts it again from the beginning (the PC keeps no partial files).
+    func restart(directory: URL) {
+        let name = directory.lastPathComponent
+        session.getAllTasks { tasks in
+            for task in tasks where task.taskDescription == name { task.cancel() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.lock.lock()
+                self.activeScans.remove(name)
+                self.lock.unlock()
+                self.upload(directory: directory)
+            }
+        }
+    }
+
+    private static func zipURL(_ name: String) -> URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
+        let folder = caches.appendingPathComponent("uploads", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appendingPathComponent(name + "-upload.zip")
+    }
 
     static func ping(_ settings: PCLinkSettings, completion: @escaping (Bool, String) -> Void) {
         guard let url = settings.url("/api/system") else {
@@ -195,7 +257,7 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
         let settings = PCLinkSettings.load()
         let name = directory.lastPathComponent
         let recipe = UserDefaults.standard.bool(forKey: "PCLinkDraft") ? "draft" : "base"
-        guard settings.isConfigured, let url = settings.url("/api/scan/upload", query: ["name": name, "recipe": recipe]) else {
+        guard settings.isPaired, let url = settings.url("/api/scan/upload", query: ["name": name, "recipe": recipe]) else {
             report(name, nil, "Pair with the PC first (Settings tab)")
             return
         }
@@ -204,10 +266,27 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
         if !alreadyRunning { activeScans.insert(name) }
         lock.unlock()
         if alreadyRunning { return }
+        PCUploader.setFailed(name, false)
         report(name, 0, "Packing…")
-        DispatchQueue.global(qos: .utility).async {
+        // Packing runs in the app: keep the screen on and ask iOS for time if the phone is locked anyway.
+        DispatchQueue.main.async { UIApplication.shared.isIdleTimerDisabled = true }
+        var backgroundTask = UIBackgroundTaskIdentifier.invalid
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "pack scan") {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                DispatchQueue.main.async {
+                    UIApplication.shared.isIdleTimerDisabled = false
+                    if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask) }
+                }
+            }
             do {
-                let zip = try ShareUtility.createZipArchive(directory: directory)
+                let packed = try ShareUtility.createZipArchive(directory: directory)
+                let zip = PCUploader.zipURL(name)
+                try? FileManager.default.removeItem(at: zip)
+                try FileManager.default.moveItem(at: packed, to: zip)
                 let size = (try? FileManager.default.attributesOfItem(atPath: zip.path)[.size] as? Int64) ?? 0
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
@@ -215,34 +294,71 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
                 request.setValue(settings.token, forHTTPHeaderField: "X-Token")
                 request.setValue(name, forHTTPHeaderField: "X-Scan-Name")
                 request.setValue(String(size), forHTTPHeaderField: "X-Scan-Bytes")
-                let task = self.session.uploadTask(with: request, fromFile: zip) { data, response, error in
-                    try? FileManager.default.removeItem(at: zip)
-                    self.lock.lock()
-                    self.activeScans.remove(name)
-                    self.lock.unlock()
-                    if let error = error {
-                        self.report(name, nil, "Upload failed: \(error.localizedDescription)")
-                    } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                        PCUploader.markUploaded(name)
-                        next?()
-                        self.report(name, nil, "Sent to PC — preparing frames…")
-                        self.follow(scan: name, settings: settings, attempt: 0)
-                    } else {
-                        let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                        self.report(name, nil, "PC answered \((response as? HTTPURLResponse)?.statusCode ?? 0) \(text.prefix(120))")
-                    }
-                }
+                let task = self.session.uploadTask(with: request, fromFile: zip)
+                task.taskDescription = name
                 self.lock.lock()
                 self.names[task.taskIdentifier] = name
+                self.followers[task.taskIdentifier] = next
                 self.lock.unlock()
                 task.resume()
-                self.report(name, 0, "Uploading \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))…")
+                self.report(name, 0, "Uploading \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) — you can lock the phone")
             } catch {
                 self.lock.lock()
                 self.activeScans.remove(name)
                 self.lock.unlock()
+                PCUploader.setFailed(name, true)
                 self.report(name, nil, "Could not pack the scan: \(error.localizedDescription)")
             }
+        }
+    }
+
+    // MARK: Background session delegate
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        responses[dataTask.taskIdentifier, default: Data()].append(data)
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let name = task.taskDescription ?? names[task.taskIdentifier]
+        let data = responses.removeValue(forKey: task.taskIdentifier)
+        let next = followers.removeValue(forKey: task.taskIdentifier) ?? nil
+        names.removeValue(forKey: task.taskIdentifier)
+        if let name = name { activeScans.remove(name) }
+        lock.unlock()
+        guard let scan = name else { return }
+        let zip = PCUploader.zipURL(scan)
+        if let error = error {
+            PCUploader.setFailed(scan, true)
+            if (error as NSError).code == NSURLErrorCancelled {
+                report(scan, nil, "Upload stopped — tap Resume upload")
+            } else {
+                let settings = PCLinkSettings.load()
+                report(scan, nil, "Upload failed: " + PCLinkSettings.explainFailure(error, host: settings.host) + " Tap Resume upload.")
+            }
+            try? FileManager.default.removeItem(at: zip)
+            return
+        }
+        try? FileManager.default.removeItem(at: zip)
+        if let http = task.response as? HTTPURLResponse, http.statusCode == 200 {
+            PCUploader.markUploaded(scan)
+            PCUploader.setFailed(scan, false)
+            next?()
+            report(scan, nil, "Sent to PC — preparing frames…")
+            follow(scan: scan, settings: PCLinkSettings.load(), attempt: 0)
+        } else {
+            PCUploader.setFailed(scan, true)
+            let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            report(scan, nil, "PC answered \((task.response as? HTTPURLResponse)?.statusCode ?? 0) \(text.prefix(120)) — tap Resume upload")
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        DispatchQueue.main.async {
+            self.backgroundCompletion?()
+            self.backgroundCompletion = nil
         }
     }
 
@@ -299,6 +415,7 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
 
     private func report(_ name: String, _ progress: Double?, _ message: String) {
         DispatchQueue.main.async {
+            self.lastStatus[name] = (progress, message)
             self.onUpdate?(name, progress, message)
             NotificationCenter.default.post(name: PCUploader.statusNotification, object: nil,
                                             userInfo: ["scan": name, "message": message, "progress": progress as Any])
