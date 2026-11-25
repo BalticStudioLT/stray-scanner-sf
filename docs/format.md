@@ -105,6 +105,11 @@ This fork adds two files. All files above are unchanged, so existing tools keep 
 | iso_min, iso_max, exposure_duration_min_s, exposure_duration_max_s | Limits of the active camera format |
 | exposure_control_available | `false` if the device does not support exposure control (then everything is automatic) |
 | fps_divider | Every n-th camera frame was saved (1 = 60 fps, 2 = 30 fps, ...) |
+| video_codec | `"hevc"` |
+| video_quality | `"standard"`, `"high"` or `"maximum"` — the Video quality setting (2026-11-25). Missing in older scans = standard |
+| video_bitrate_bps | Target HEVC bit rate, `null` when iOS chose it (standard). High ≈ 45 Mbit/s for 1920×1440 at 60 fps, 29 Mbit/s at 30 fps; one key frame per second, no frame reordering |
+| median_depth_at_start_m | LiDAR distance to the scene when recording started — focus is locked there |
+| stills_interval_s | Shortest time between sharp photos, `null` when the option is off (see Sharp photos below) |
 
 Note: with a fixed shutter the ISO is still adjusted automatically while recording (in small steps, about 5 times per second) so the brightness stays usable when you move between bright and dark areas. Use the per-frame `iso` column if you need photometric consistency.
 
@@ -197,3 +202,26 @@ slows recording. Frame numbers are the same as in `odometry.csv` / `depth/`.
 (x y z, nx ny nz, f_dc_0..2, opacity, scale_0..2, rot_0..3; no f_rest) in the scan's ARKit world coordinates (y up,
 metres) — the same frame as `odometry.csv`. v1 is a quick preview: splats sit on 1.5 cm LiDAR voxels (positions fixed),
 isotropic; colour, opacity and size are learnt from ~120 sharp frames (480 px wide, L1, Adam, ~3000 steps).
+
+
+## Sharp photos (stray-scanner-sf fork, optional, 2026-11-25)
+
+With "Sharp photos" on, the app asks ARKit for a high-resolution frame (`ARSession.captureHighResolutionFrame`,
+about 12 MP on Pro phones) once or twice a second while the video runs, only when the phone is steady
+(estimated blur under 0.8 video pixels) and tracking is normal.
+
+* `stills/<n>.jpg` — the photo, sensor orientation (landscape, like the video frames), JPEG quality 0.9, sRGB.
+* `stills.csv` — one row per photo:
+
+| Field | Meaning |
+|---|---|
+| still | Photo number, e.g. `000012` (file name) |
+| timestamp | Capture time in seconds, same clock as `odometry.csv` |
+| frame | Latest saved video frame when the photo arrived; use its `depth/`, `confidence/` and `masks/` |
+| x, y, z, qx, qy, qz, qw | Pose of the photo itself, same convention as `odometry.csv` |
+| fx, fy, cx, cy | Intrinsics of the photo in its own pixels (not the video's) |
+| width, height | Photo size in pixels |
+| exposure_duration_s, iso | Exposure of the photo |
+
+The photos are extra training views with about twice the linear resolution of the video. They are not in
+`odometry.csv` and have no depth map of their own.

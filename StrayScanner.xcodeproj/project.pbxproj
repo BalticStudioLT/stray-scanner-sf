@@ -82,6 +82,12 @@
 		A1B2C3D4E5F6071829304C03 /* SplatLOD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304C01 /* SplatLOD.swift */; };
 		A1B2C3D4E5F6071829304D02 /* ScanSplatsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */; };
 		A1B2C3D4E5F6071829304D03 /* ScanSplatsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */; };
+		A1B2C3D4E5F6071829305002 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305001 /* SettingsView.swift */; };
+		A1B2C3D4E5F6071829305003 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829305001 /* SettingsView.swift */; };
+		A1B2C3D4E5F6071829304F02 /* StillEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */; };
+		A1B2C3D4E5F6071829304F03 /* StillEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */; };
+		A1B2C3D4E5F6071829304E02 /* CaptureSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304E01 /* CaptureSettings.swift */; };
+		A1B2C3D4E5F6071829304E03 /* CaptureSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304E01 /* CaptureSettings.swift */; };
 		A1B2C3D4E5F6071829304A02 /* MotionMaskEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */; };
 		A1B2C3D4E5F6071829304A03 /* MotionMaskEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */; };
 		70D1273B2E1800000027BEEF /* FrameQualityEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */; };
@@ -159,6 +165,9 @@
 		A1B2C3D4E5F6071829304B01 /* PhoneTrainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneTrainer.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304C01 /* SplatLOD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatLOD.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanSplatsSection.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829305001 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StillEncoder.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829304E01 /* CaptureSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSettings.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionMaskEncoder.swift; sourceTree = "<group>"; };
 		70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameQualityEncoder.swift; sourceTree = "<group>"; };
 		70D127FA2E1800000027BEEF /* WallSweepGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallSweepGuide.swift; sourceTree = "<group>"; };
@@ -253,6 +262,7 @@
 				386E277725991163007D023B /* RecordButton.swift */,
 				38C17B22259D1C80006B3FDA /* SessionDetail.swift */,
 				A1B2C3D4E5F6071829304D01 /* ScanSplatsSection.swift */,
+				A1B2C3D4E5F6071829305001 /* SettingsView.swift */,
 				5F0E1A2B3C4D5E6F70819A01 /* ScanReplay.swift */,
 				387B57C125EC065600132903 /* InformationView.swift */,
 			);
@@ -328,6 +338,8 @@
 				70D1273A2E1800000027BEEF /* FrameQualityEncoder.swift */,
 				A1B2C3D4E5F6071829304A01 /* MotionMaskEncoder.swift */,
 				A1B2C3D4E5F6071829304C01 /* SplatLOD.swift */,
+				A1B2C3D4E5F6071829304F01 /* StillEncoder.swift */,
+				A1B2C3D4E5F6071829304E01 /* CaptureSettings.swift */,
 				A1B2C3D4E5F6071829304B01 /* PhoneTrainer.swift */,
 				70D1272A2E1800000027BEEF /* ScanQualityMonitor.swift */,
 				70D1271A2E1800000027BEEF /* ScanRenderer.swift */,
@@ -598,6 +610,9 @@
 				385999BD25616F2B00F3F681 /* AppDelegate.swift in Sources */,
 				38C17B23259D1C80006B3FDA /* SessionDetail.swift in Sources */,
 				A1B2C3D4E5F6071829304D02 /* ScanSplatsSection.swift in Sources */,
+				A1B2C3D4E5F6071829305002 /* SettingsView.swift in Sources */,
+				A1B2C3D4E5F6071829304F02 /* StillEncoder.swift in Sources */,
+				A1B2C3D4E5F6071829304E02 /* CaptureSettings.swift in Sources */,
 				5F0E1A2B3C4D5E6F70819A02 /* ScanReplay.swift in Sources */,
 				385999C225616F2B00F3F681 /* Stray_Scanner.xcdatamodeld in Sources */,
 				38045D5A2561AC000004F23C /* SessionList.swift in Sources */,
@@ -648,6 +663,9 @@
 				3863FE6525FCBB0E00C1DA4F /* AppDelegate.swift in Sources */,
 				3863FE6625FCBB0E00C1DA4F /* SessionDetail.swift in Sources */,
 				A1B2C3D4E5F6071829304D03 /* ScanSplatsSection.swift in Sources */,
+				A1B2C3D4E5F6071829305003 /* SettingsView.swift in Sources */,
+				A1B2C3D4E5F6071829304F03 /* StillEncoder.swift in Sources */,
+				A1B2C3D4E5F6071829304E03 /* CaptureSettings.swift in Sources */,
 				5F0E1A2B3C4D5E6F70819A03 /* ScanReplay.swift in Sources */,
 				3863FE6825FCBB0E00C1DA4F /* Stray_Scanner.xcdatamodeld in Sources */,
 				3863FE6925FCBB0E00C1DA4F /* SessionList.swift in Sources */,

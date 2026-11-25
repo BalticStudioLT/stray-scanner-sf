@@ -48,51 +48,21 @@ struct SessionDetailView: View {
     @State private var showingShareSheet = false
     @State private var tempPackageURL: URL?
     @State private var isCreatingPackage = false
-    @State private var player: AVPlayer?
     @State private var shareError: String?
     @State private var summary: ScanSummary?
     @State private var pcStatus: String?
     @State private var pcProgress: Double?
-
-    let defaultUrl = URL(fileURLWithPath: "")
+    @State private var title = ""
+    @State private var renaming = false
+    @State private var newName = ""
 
     var body: some View {
-        let width = UIScreen.main.bounds.size.width
-        let height = width * 0.75
         ZStack {
         Color("BackgroundColor")
             .edgesIgnoringSafeArea(.all)
         ScrollView {
         VStack {
-            VideoPlayer(player: player ?? AVPlayer(url: defaultUrl))
-                // The video is stored the way the sensor sees it (landscape); scans are filmed upright,
-                // so turn it a quarter turn to show the room the right way up.
-                .frame(width: height, height: height * 0.75)
-                .rotationEffect(.degrees(90))
-                .frame(width: width, height: height)
-                .clipped()
-                .padding(.horizontal, 0.0)
-                .onAppear {
-                    if player == nil {
-                        player = AVPlayer(url: recording.absoluteRgbPath() ?? defaultUrl)
-                    }
-                }
-            
-            if let summary = summary {
-                VStack(alignment: .leading, spacing: 8) {
-                    ScanSummaryChips(summary: summary)
-                    if let blur = summary.medianBlur {
-                        Text(String(format: "Median motion blur %.1f px · %d frames with limited tracking", blur, summary.limitedTrackingFrames))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .glassCard(cornerRadius: 20)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-            }
+            header
 
             if let status = pcStatus {
                 VStack(spacing: 6) {
@@ -188,7 +158,31 @@ struct SessionDetailView: View {
                 DispatchQueue.main.async { summary = loaded }
             }
         }
-        .navigationBarTitle(viewModel.title(recording: recording))
+        .navigationBarTitle(title.isEmpty ? recording.displayTitle : title)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    newName = recording.customName ?? ""
+                    renaming = true
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .accessibilityLabel("Rename scan")
+            }
+        }
+        .alert("Rename scan", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Save") {
+                let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                recording.name = trimmed.isEmpty ? nil : trimmed
+                try? recording.managedObjectContext?.save()
+                title = recording.displayTitle
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Leave it empty to show the date again.")
+        }
         .background(Color("BackgroundColor"))
         .sheet(isPresented: $showingShareSheet) {
             if let packageURL = tempPackageURL {
@@ -211,6 +205,74 @@ struct SessionDetailView: View {
             Text(shareError ?? "")
         }
         }
+    }
+
+    /// Picture of the scan (tap: the player with all views) beside its key numbers.
+    /// Replaces the full-width sideways video that left the sides of the screen empty.
+    private var header: some View {
+        let folder = recording.directoryPath()
+        let pictureWidth = min(UIScreen.main.bounds.size.width * 0.44, 190)
+        return HStack(alignment: .top, spacing: 14) {
+            if let folder = folder {
+                NavigationLink(destination: ScanReplayView(folder: folder)) {
+                    ZStack {
+                        ScanThumbnailView(video: recording.absoluteRgbPath(), key: folder.lastPathComponent,
+                                          width: pictureWidth, height: pictureWidth * 4 / 3)
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 44))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                            .shadow(radius: 6)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Play the scan with all views")
+            }
+            VStack(alignment: .leading, spacing: 9) {
+                fact("clock", lengthText)
+                if let summary = summary {
+                    fact("film.stack", "\(summary.frames) frames" + (summary.photos > 0 ? " + \(summary.photos) photos" : ""))
+                    if let shutter = summary.shutter {
+                        fact("camera.aperture", (shutter == "Auto" ? "Auto shutter" : "\(shutter) s")
+                             + (summary.videoQuality.map { " · \($0) quality" } ?? ""))
+                    }
+                    if let sharp = summary.sharpFraction {
+                        fact("scope", "\(Int(sharp * 100))% sharp" + (summary.medianBlur.map { String(format: " · blur %.1f px", $0) } ?? ""),
+                             tint: sharp > 0.85 ? .green : (sharp > 0.6 ? .yellow : .red))
+                    }
+                    if summary.limitedTrackingFrames > 0 {
+                        fact("exclamationmark.triangle", "\(summary.limitedTrackingFrames) frames with weak tracking", tint: .orange)
+                    }
+                    if summary.sizeBytes > 0 {
+                        fact("internaldrive", ByteCountFormatter.string(fromByteCount: summary.sizeBytes, countStyle: .file))
+                    }
+                    if summary.markers > 0 { fact("mappin.and.ellipse", "\(summary.markers) pins") }
+                    if summary.ultraWidePasses > 0 { fact("camera.aperture", "+ \(summary.ultraWidePasses) pass at 0.5×", tint: .cyan) }
+                    if summary.sentToPC { fact("desktopcomputer", "Sent to the PC", tint: .green) }
+                } else {
+                    ProgressView()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    private var lengthText: String {
+        let seconds = Int(recording.duration.rounded())
+        return seconds >= 60 ? String(format: "%d min %02d s", seconds / 60, seconds % 60) : "\(seconds) s"
+    }
+
+    private func fact(_ symbol: String, _ text: String, tint: Color = .primary) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol)
+                .frame(width: 20)
+                .foregroundStyle(tint == .primary ? Color.secondary : tint)
+            Text(text)
+                .foregroundStyle(tint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.subheadline.monospacedDigit())
     }
 
     func sendToPC() {

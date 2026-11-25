@@ -57,3 +57,11 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-11 19:50 "update app based on all last things. check fable, opus etc." → LOD v4 (merged L0, pick rule, L2 delta), start_view, footprint cull + clamped Jacobian, disk cache
 - 2026-11-12 22:04 "put it to phone" → reinstalled latest build via Xcode
 - 2026-11-13 00:25 "I cant ser rendered splats on phone. Where are they"
+- 2026-11-25 00:33 "check what was done with the splatforge. implement updates and upload app to my new iphone 16"
+- 2026-11-25 00:33 "also analyze yourself and improve it"
+- 2026-11-25 00:34 "specially UI and perfomance with a scan quality"
+- 2026-11-25 00:55 "clear xcode cache" (answer to: the Mac disk is full, 0.2 GB free of 229 GB, Xcode could not prepare the new iPhone)
+- 2026-11-25 01:03 "give me pc token. also can i open and watch 4d splats?"
+- 2026-11-25 01:09 [screenshot: PC link sheet, host coolmaster4.tailc6292e.ts.net, port 8777, token filled] "Cant connect" → checked from the Mac: PC is on Tailscale and answers ping, the new iPhone is on the tailnet, but nothing listens on 8777/8778 = SplatForge Studio is not running on the PC (start A:\AI\SplatForge\studio.bat)
+- 2026-11-25 01:15 [screenshot: Splats tab scrolled to the bottom, shows the Jobs list] "I cant see scan at the bottom" → the splat list had moved to the top of the tab; jobs list was pushing everything else away
+- 2026-11-25 10:42 "finish it"

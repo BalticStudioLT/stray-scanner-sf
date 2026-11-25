@@ -30,6 +30,10 @@ class DatasetEncoder {
     /// People and other moving things to leave out of training (masks/ + masks.csv).
     private let maskEncoder: MotionMaskEncoder
     private let markerEncoder: MarkerEncoder
+    /// Sharp 12 MP photos taken beside the video (optional, stills/ + stills.csv).
+    private let stillEncoder: StillEncoder?
+    private let stillInterval: TimeInterval?
+    private let videoQuality: VideoQuality
     /// Frames skipped because the encoder was still busy with earlier ones.
     public private(set) var droppedFrames: Int = 0
     public var savedFrameCount: Int { return savedFrames }
@@ -58,8 +62,10 @@ class DatasetEncoder {
     private var latestGyroscopeData: (timestamp: Double, data: simd_double3)?
 
 
-    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1, exposureController: ExposureController? = nil) {
+    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1, exposureController: ExposureController? = nil,
+         stillInterval: TimeInterval? = nil) {
         self.frameInterval = fpsDivider
+        self.stillInterval = stillInterval
         self.exposureController = exposureController
         self.queue = DispatchQueue(label: "encoderQueue")
         
@@ -71,7 +77,13 @@ class DatasetEncoder {
         datasetDirectory = DatasetEncoder.createDirectory(id: &theId)
         self.id = theId
         self.rgbFilePath = datasetDirectory.appendingPathComponent("rgb.mp4")
-        self.rgbEncoder = VideoEncoder(file: self.rgbFilePath, width: width, height: height, framesPerSecond: arConfiguration.videoFormat.framesPerSecond)
+        let quality = VideoQuality.load()
+        self.videoQuality = quality
+        let savedFps = Double(arConfiguration.videoFormat.framesPerSecond) / Double(max(fpsDivider, 1))
+        self.rgbEncoder = VideoEncoder(file: self.rgbFilePath, width: width, height: height,
+                                       framesPerSecond: arConfiguration.videoFormat.framesPerSecond,
+                                       bitRate: quality.bitRate(width: Int(width), height: Int(height), savedFramesPerSecond: savedFps),
+                                       savedFramesPerSecond: Int(savedFps.rounded()))
         self.depthFilePath = datasetDirectory.appendingPathComponent("depth", isDirectory: true)
         self.depthEncoder = DepthEncoder(outDirectory: self.depthFilePath)
         let confidenceFilePath = datasetDirectory.appendingPathComponent("confidence", isDirectory: true)
@@ -88,6 +100,7 @@ class DatasetEncoder {
         self.frameQualityEncoder = FrameQualityEncoder(url: datasetDirectory.appendingPathComponent("frame_quality.csv", isDirectory: false))
         self.maskEncoder = MotionMaskEncoder(directory: datasetDirectory)
         self.markerEncoder = MarkerEncoder(url: datasetDirectory.appendingPathComponent("markers.csv", isDirectory: false))
+        self.stillEncoder = stillInterval == nil ? nil : StillEncoder(directory: datasetDirectory)
         // Marks the scan as unfinished until wrapUp(); a scan left with this file after a crash
         // is recovered on the next launch (see AppDaemon).
         FileManager.default.createFile(atPath: datasetDirectory.appendingPathComponent(DatasetEncoder.inProgressMarker).path, contents: nil)
@@ -127,6 +140,11 @@ class DatasetEncoder {
         // video frame i belonged to odometry row i + 1. Fixed here: video frame i == odometry row i
         // == depth/confidence i. Importers: use offset 0 when this key is present, 1 when it is missing.
         info["video_frame_offset"] = 0
+        info["video_codec"] = "hevc"
+        info["video_quality"] = videoQuality.name
+        info["video_bitrate_bps"] = rgbEncoder.appliedBitRate.map { $0 as Any } ?? NSNull()
+        // Sharp photos beside the video: stills/<n>.jpg + stills.csv (own pose and intrinsics per photo).
+        info["stills_interval_s"] = stillInterval.map { $0 as Any } ?? NSNull()
         do {
             let data = try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: captureSettingsPath)
@@ -134,6 +152,21 @@ class DatasetEncoder {
             print("Could not write capture settings. \(error.localizedDescription)")
         }
     }
+
+    /// A high-resolution photo from ARKit (see StillEncoder). `iso` is read by the caller at arrival.
+    func addStill(frame: ARFrame, iso: Float?) {
+        stillEncoder?.add(frame: frame, videoFrame: savedFrames - 1, iso: iso)
+    }
+
+    /// The video file can no longer be written (disk full, encoder error): the scan cannot be saved.
+    public var videoFailed: Bool {
+        if case .error = rgbEncoder.status { return true }
+        return false
+    }
+
+    /// Photos taken so far, and how many are still being written.
+    public var stillCount: Int { return stillEncoder?.count ?? 0 }
+    public var stillsPending: Int { return stillEncoder?.pending ?? 0 }
 
     func add(frame: ARFrame, quality: FrameQuality? = nil) {
         currentFrame = currentFrame + 1
@@ -221,30 +254,24 @@ class DatasetEncoder {
         self.exposureEncoder.done()
         self.frameQualityEncoder.done()
         self.maskEncoder.done()
+        self.stillEncoder?.done()
         queue.sync {
             self.markerEncoder.done()
         }
         try? FileManager.default.removeItem(at: datasetDirectory.appendingPathComponent(DatasetEncoder.inProgressMarker))
         writeIntrinsics()
-        switch self.rgbEncoder.status {
-            case .allGood:
-                status = .allGood
-            case .error:
-                status = .videoEncodingError
+        // Any failed part makes the scan failed (a later "all good" must not hide an earlier error).
+        status = .allGood
+        if case .error = self.rgbEncoder.status {
+            status = .videoEncodingError
         }
-        switch self.depthEncoder.status {
-            case .allGood:
-                status = .allGood
-            case .frameEncodingError:
-                status = .videoEncodingError
-                print("Something went wrong encoding depth.")
+        if case .frameEncodingError = self.depthEncoder.status {
+            status = .videoEncodingError
+            print("Something went wrong encoding depth.")
         }
-        switch self.confidenceEncoder.status {
-            case .allGood:
-                status = .allGood
-            case .encodingError:
-                status = .videoEncodingError
-                print("Something went wrong encoding confidence values.")
+        if case .encodingError = self.confidenceEncoder.status {
+            status = .videoEncodingError
+            print("Something went wrong encoding confidence values.")
         }
     }
 

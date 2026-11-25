@@ -387,6 +387,13 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         settings["video_height"] = Int(videoSize.height)
         settings["video_fps"] = videoFPS
         settings["video_frame_offset"] = 0
+        // Same Video quality setting as the LiDAR scan (explicit HEVC bit rate, see VideoEncoder).
+        let quality = VideoQuality.load()
+        let bitRate = quality.bitRate(width: Int(videoSize.width), height: Int(videoSize.height),
+                                      savedFramesPerSecond: Double(videoFPS))
+        settings["video_codec"] = "hevc"
+        settings["video_quality"] = quality.name
+        settings["video_bitrate_bps"] = bitRate.map { $0 as Any } ?? NSNull()
         if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: folder.appendingPathComponent("capture_settings.json"))
         }
@@ -402,7 +409,8 @@ final class UltraWideRecordViewController: UIViewController, AVCaptureVideoDataO
         if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: folder.appendingPathComponent("capture_settings.json"))
         }
-        let encoder = VideoEncoder(file: folder.appendingPathComponent("rgb.mp4"), width: videoSize.width, height: videoSize.height, framesPerSecond: videoFPS)
+        let encoder = VideoEncoder(file: folder.appendingPathComponent("rgb.mp4"), width: videoSize.width, height: videoSize.height,
+                                   framesPerSecond: videoFPS, bitRate: bitRate, savedFramesPerSecond: videoFPS)
         captureQueue.async {
             self.frameIndex = 0
             self.wroteCameraMatrix = false
@@ -826,6 +834,7 @@ struct UltraWideSessionView: View {
         UltraWideRepresentable(parentScan: parentScan, onDone: { dismiss() })
             .ignoresSafeArea()
             .toolbar(.hidden, for: .navigationBar)
+            .toolbar(.hidden, for: .tabBar)
             .preferredColorScheme(.dark)
     }
 }

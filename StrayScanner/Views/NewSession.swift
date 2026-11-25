@@ -46,6 +46,7 @@ struct NewSessionView : View {
         RecordSessionManager(continueFrom: continueFrom)
             .ignoresSafeArea()
             .toolbar(.hidden, for: .navigationBar)
+            .toolbar(.hidden, for: .tabBar)
             .preferredColorScheme(.dark)
 
     }

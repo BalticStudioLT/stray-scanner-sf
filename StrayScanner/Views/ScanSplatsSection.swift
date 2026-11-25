@@ -72,8 +72,8 @@ struct ScanSplatsSection: View {
     private func load() {
         let scan = folder.lastPathComponent
         Task {
-            guard PCLinkSettings.load().isConfigured else {
-                await MainActor.run { pcState = "PC not paired (gear button on the PC screen)." }
+            guard PCLinkSettings.load().isPaired else {
+                await MainActor.run { pcState = "This phone is not paired with the PC yet (Settings tab)." }
                 return
             }
             guard let results = await fetch("/stray/results") as? [[String: Any]],

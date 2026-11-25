@@ -83,9 +83,9 @@ final class SplatForgeClient: ObservableObject {
 
     private func get<T>(_ path: String, completion: @escaping (T?) -> Void) {
         let s = settings
-        guard s.isConfigured, let url = s.url(path) else {
+        guard s.isPaired, let url = s.url(path) else {
             DispatchQueue.main.async {
-                self.error = "Set the PC address and Studio token (gear button)."
+                self.error = "This phone is not paired with the PC yet (Settings tab ▸ Pair with the PC)."
                 completion(nil)
             }
             return
@@ -96,9 +96,9 @@ final class SplatForgeClient: ObservableObject {
             var value: T?
             var problem: String?
             if let error = error {
-                problem = error.localizedDescription
+                problem = PCLinkSettings.explainFailure(error, host: s.host)
             } else if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-                problem = http.statusCode == 403 ? "Wrong Studio token" : "PC answered \(http.statusCode)"
+                problem = http.statusCode == 403 ? "The PC refused the token — pair again in the Settings tab" : "PC answered \(http.statusCode)"
             } else if let data = data {
                 value = (try? JSONSerialization.jsonObject(with: data)) as? T
             }
@@ -130,6 +130,7 @@ struct SplatForgeView: View {
     @State private var showingStudio = false
     @State private var viewerSource: SplatSource?
     @State private var showingImporter = false
+    @State private var phoneSplats: [PhoneSplatItem] = []
 
     var body: some View {
         List {
@@ -138,16 +139,20 @@ struct SplatForgeView: View {
                     Label(error, systemImage: "wifi.exclamationmark")
                         .foregroundStyle(.orange)
                     Button("PC link settings") { showingSettings = true }
+                } footer: {
+                    Text("Splats made by SplatForge are listed here when this phone can reach the PC.")
                 }
             }
-            machineSection
             liveSection
+            phoneScanSplatsSection
+            phoneSplatsSection
+            otherSplatsSection
+            machineSection
             activitySection
             jobsSection
-            projectsSection
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("SplatForge")
+        .navigationTitle("Splats")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -188,7 +193,10 @@ struct SplatForgeView: View {
                       allowedContentTypes: [UTType(filenameExtension: "ply") ?? .data]) { result in
             if case .success(let url) = result { viewerSource = .file(url) }
         }
-        .onAppear { client.start() }
+        .onAppear {
+            client.start()
+            findPhoneSplats()
+        }
         .onDisappear { client.stop() }
         .preferredColorScheme(.dark)
     }
@@ -226,28 +234,59 @@ struct SplatForgeView: View {
         }
     }
 
+    /// What the "Training now" card shows. SplatForge (2026-11-13) sends `live` = progress.json, written every 500
+    /// steps; the snapshots list only grows every 5 000 steps and is used for the PSNR curve.
+    private struct LiveState {
+        var line = ""
+        var fraction: Double?
+        var eta: String?
+        var psnrs: [Double] = []
+    }
+
+    private func liveState() -> LiveState {
+        var state = LiveState()
+        let snaps = client.live["snaps"] as? [[String: Any]] ?? []
+        let progress = client.live["progress"] as? [String: Any] ?? [:]
+        let now = (client.live["live"] as? [String: Any]) ?? snaps.last ?? [:]
+        let step = number(now["step"])
+        let steps = number(now["steps"]) ?? number(progress["steps"])
+        var parts: [String] = []
+        if let step = step {
+            if let steps = steps, steps > 0 {
+                parts.append("step \(Int(step)) / \(Int(steps))")
+                state.fraction = min(max(step / steps, 0), 1)
+            } else {
+                parts.append("step \(Int(step))")
+            }
+        }
+        if let psnr = number(now["psnr_train"]) ?? number(now["psnr"]) { parts.append(String(format: "PSNR %.2f", psnr)) }
+        if let splats = number(now["splats"]) { parts.append(String(format: "%.1f M splats", splats / 1e6)) }
+        state.line = parts.joined(separator: " · ")
+        if state.fraction == nil {
+            state.fraction = (number(progress["fraction"]) ?? number(progress["progress"])).map { min(max($0, 0), 1) }
+        }
+        state.eta = eta(number(now["eta_s"]) ?? number(progress["eta_s"]))
+        state.psnrs = snaps.compactMap { number($0["psnr_train"]) ?? number($0["psnr"]) }
+        return state
+    }
+
     @ViewBuilder private var liveSection: some View {
         if let run = client.live["run"] as? String {
+            let state = liveState()
+            let finished = (client.live["done"] as? Bool) == true
             Section("Training now") {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(run).font(.headline)
                     if let project = client.live["project"] as? String {
                         Text(URL(fileURLWithPath: project).lastPathComponent).font(.caption).foregroundStyle(.secondary)
                     }
-                    if let snaps = client.live["snaps"] as? [[String: Any]], let last = snaps.last {
-                        let step = number(last["step"]).map { "step \(Int($0))" } ?? ""
-                        let psnr = number(last["psnr"]).map { String(format: " · PSNR %.2f", $0) } ?? ""
-                        let splats = number(last["splats"]).map { String(format: " · %.1f M splats", $0 / 1e6) } ?? ""
-                        Text(step + psnr + splats).font(.subheadline.monospacedDigit())
-                        let psnrs = snaps.compactMap { number($0["psnr"]) }
-                        if psnrs.count > 1 { Sparkline(values: psnrs).frame(height: 36) }
+                    if !state.line.isEmpty {
+                        Text(state.line).font(.subheadline.monospacedDigit())
                     }
-                    if let progress = client.live["progress"] as? [String: Any] {
-                        let fraction = number(progress["fraction"]) ?? number(progress["progress"])
-                        if let f = fraction { ProgressView(value: min(max(f, 0), 1)) }
-                        if let text = eta(number(progress["eta_s"])) { Text(text).font(.caption).foregroundStyle(.secondary) }
-                    }
-                    if (client.live["done"] as? Bool) == true {
+                    if state.psnrs.count > 1 { Sparkline(values: state.psnrs).frame(height: 36) }
+                    if !finished, let fraction = state.fraction { ProgressView(value: fraction) }
+                    if !finished, let text = state.eta { Text(text).font(.caption).foregroundStyle(.secondary) }
+                    if finished {
                         Label("Finished", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.caption)
                     }
                 }
@@ -270,74 +309,171 @@ struct SplatForgeView: View {
         }
     }
 
+    private func jobRow(_ job: [String: Any]) -> some View {
+        let id = (job["id"] as? Int) ?? -1
+        let status = (job["status"] as? String) ?? ""
+        let args = (job["args"] as? [String])?.joined(separator: " ") ?? ""
+        let label = (job["label"] as? String) ?? ""
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                // verbatim: a plain "#1331", not the locale's "#1,331"
+                Text(verbatim: "#\(id) " + (label.isEmpty ? args : label)).font(.caption.monospaced()).lineLimit(2)
+                Text(status).font(.caption2).foregroundStyle(status == "failed" ? Color.red : Color.secondary)
+            }
+            Spacer()
+            if status == "running" || status == "queued" {
+                Button(role: .destructive) {
+                    client.cancel(job: id)
+                } label: {
+                    Image(systemName: "stop.circle")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Cancel job \(id)")
+            }
+        }
+    }
+
+    /// Waiting and running jobs are shown; finished ones are folded away so they don't bury the splats.
     @ViewBuilder private var jobsSection: some View {
-        if !client.jobs.isEmpty {
-            Section("Jobs") {
-                ForEach(Array(client.jobs.prefix(15).enumerated()), id: \.offset) { _, job in
-                    let id = (job["id"] as? Int) ?? -1
-                    let status = (job["status"] as? String) ?? ""
-                    let args = (job["args"] as? [String])?.joined(separator: " ") ?? ""
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("#\(id) \(args)").font(.caption.monospaced()).lineLimit(2)
-                            Text(status).font(.caption2).foregroundStyle(status == "failed" ? .red : .secondary)
-                        }
-                        Spacer()
-                        if status == "running" || status == "queued" {
-                            Button(role: .destructive) {
-                                client.cancel(job: id)
-                            } label: {
-                                Image(systemName: "stop.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel("Cancel job \(id)")
+        let jobs = Array(client.jobs.prefix(30))
+        let open = jobs.filter { ["running", "queued"].contains(($0["status"] as? String) ?? "") }
+        let closed = jobs.filter { !["running", "queued"].contains(($0["status"] as? String) ?? "") }
+        if !jobs.isEmpty {
+            Section("Jobs on the PC") {
+                if open.isEmpty {
+                    Text("Nothing is waiting or running.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(Array(open.enumerated()), id: \.offset) { _, job in
+                    jobRow(job)
+                }
+                if !closed.isEmpty {
+                    DisclosureGroup("Finished (\(closed.count))") {
+                        ForEach(Array(closed.prefix(15).enumerated()), id: \.offset) { _, job in
+                            jobRow(job)
                         }
                     }
+                    .font(.subheadline)
                 }
             }
         }
     }
 
-    @ViewBuilder private var projectsSection: some View {
-        if !client.projects.isEmpty {
-            Section("Results") {
-                ForEach(Array(client.projects.enumerated()), id: \.offset) { _, project in
-                    let runs = (project["runs"] as? [[String: Any]]) ?? []
-                    let best = runs.compactMap { number($0["psnr"]) }.max()
-                    DisclosureGroup {
-                        ForEach(Array(runs.reversed().prefix(12).enumerated()), id: \.offset) { _, run in
-                            let plys = (run["plys"] as? [String]) ?? []
-                            let ply = plys.first(where: { $0.hasSuffix("splat.ply") }) ?? plys.last
-                            let name = (run["name"] as? String) ?? ""
-                            Button {
-                                if let ply = ply {
-                                    let projectName = (project["name"] as? String) ?? ""
-                                    viewerSource = .studio(ply: ply, title: "\(projectName) · \(name)",
-                                                           sourceScan: client.sourceScans[projectName + "/" + name])
-                                }
-                            } label: {
-                                HStack {
-                                    Image(systemName: ply == nil ? "hourglass" : "cube.fill")
-                                        .foregroundStyle(ply == nil ? Color.secondary : Color.accentColor)
-                                    Text(name).font(.caption.monospaced()).lineLimit(1)
-                                    Spacer()
-                                    if let psnr = number(run["psnr"]) { Text(String(format: "%.2f dB", psnr)).font(.caption.monospacedDigit()) }
-                                    if let splats = number(run["splats"]) { Text(String(format: "%.1fM", splats / 1e6)).font(.caption2).foregroundStyle(.secondary) }
-                                }
-                            }
-                            .disabled(ply == nil)
-                            .accessibilityLabel("View \(name) in 3D or AR")
+    /// A project SplatForge made from a scan sent by the phone app.
+    private func isPhoneScan(_ project: [String: Any]) -> Bool {
+        let name = (project["name"] as? String) ?? ""
+        if name.hasPrefix("scan_") { return true }
+        return client.sourceScans.keys.contains { $0.hasPrefix(name + "/") }
+    }
+
+    /// Newest first (the PC lists them by name, which put phone scans at the very end).
+    private func projects(phoneScans: Bool) -> [[String: Any]] {
+        return client.projects
+            .filter { isPhoneScan($0) == phoneScans }
+            .sorted { (number($0["mtime"]) ?? 0) > (number($1["mtime"]) ?? 0) }
+    }
+
+    @ViewBuilder private var phoneScanSplatsSection: some View {
+        let list = projects(phoneScans: true)
+        if !list.isEmpty {
+            Section("Splats from phone scans") {
+                projectRows(list, symbol: "iphone")
+            }
+        }
+    }
+
+    @ViewBuilder private var otherSplatsSection: some View {
+        let list = projects(phoneScans: false)
+        if !list.isEmpty {
+            Section("Other splats on the PC") {
+                projectRows(list, symbol: "desktopcomputer")
+            }
+        }
+    }
+
+    private func projectRows(_ projects: [[String: Any]], symbol: String) -> some View {
+        ForEach(Array(projects.enumerated()), id: \.offset) { _, project in
+            let runs = (project["runs"] as? [[String: Any]]) ?? []
+            let best = runs.compactMap { number($0["psnr"]) }.max()
+            DisclosureGroup {
+                if runs.isEmpty {
+                    Text("No finished splat yet.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(Array(runs.reversed().prefix(12).enumerated()), id: \.offset) { _, run in
+                    let plys = (run["plys"] as? [String]) ?? []
+                    let ply = plys.first(where: { $0.hasSuffix("splat.ply") }) ?? plys.last
+                    let name = (run["name"] as? String) ?? ""
+                    Button {
+                        if let ply = ply {
+                            let projectName = (project["name"] as? String) ?? ""
+                            viewerSource = .studio(ply: ply, title: "\(projectName) · \(name)",
+                                                   sourceScan: client.sourceScans[projectName + "/" + name])
                         }
                     } label: {
                         HStack {
-                            Text((project["name"] as? String) ?? "").font(.subheadline.weight(.semibold))
+                            Image(systemName: ply == nil ? "hourglass" : "cube.fill")
+                                .foregroundStyle(ply == nil ? Color.secondary : Color.accentColor)
+                            Text(name).font(.caption.monospaced()).lineLimit(1)
                             Spacer()
-                            Text("\(runs.count) runs" + (best.map { String(format: " · best %.2f dB", $0) } ?? ""))
-                                .font(.caption).foregroundStyle(.secondary)
+                            if let psnr = number(run["psnr"]) { Text(String(format: "%.2f dB", psnr)).font(.caption.monospacedDigit()) }
+                            if let splats = number(run["splats"]) { Text(String(format: "%.1fM", splats / 1e6)).font(.caption2).foregroundStyle(.secondary) }
                         }
                     }
+                    .disabled(ply == nil)
+                    .accessibilityLabel("View \(name) in 3D or AR")
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 20)
+                    Text((project["name"] as? String) ?? "").font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer()
+                    Text(verbatim: "\(runs.count) runs" + (best.map { String(format: " · %.1f dB", $0) } ?? ""))
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+
+    /// Splats trained on this phone ("Train here" on a scan): <scan>/phone_splat.ply.
+    @ViewBuilder private var phoneSplatsSection: some View {
+        if !phoneSplats.isEmpty {
+            Section("Trained on this phone") {
+                ForEach(phoneSplats, id: \.url) { item in
+                    Button {
+                        viewerSource = .file(item.url)
+                    } label: {
+                        HStack {
+                            Image(systemName: "iphone").foregroundStyle(Color.accentColor)
+                            Text(item.title).font(.caption.monospaced()).lineLimit(1)
+                            Spacer()
+                            Text(item.size).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityLabel("View phone splat \(item.title) in 3D or AR")
+                }
+            }
+        }
+    }
+
+    private func findPhoneSplats() {
+        DispatchQueue.global(qos: .utility).async {
+            let fm = FileManager.default
+            var found: [PhoneSplatItem] = []
+            if let documents = fm.urls(for: .documentDirectory, in: .userDomainMask).first,
+               let folders = try? fm.contentsOfDirectory(at: documents, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                formatter.timeStyle = .short
+                for folder in folders where folder.hasDirectoryPath {
+                    let ply = folder.appendingPathComponent("phone_splat.ply")
+                    guard let attributes = try? fm.attributesOfItem(atPath: ply.path) else { continue }
+                    let date = (attributes[.modificationDate] as? Date) ?? Date.distantPast
+                    let bytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+                    found.append(PhoneSplatItem(url: ply, title: formatter.string(from: date), date: date,
+                                                size: ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)))
+                }
+            }
+            found.sort { $0.date > $1.date }
+            DispatchQueue.main.async { phoneSplats = found }
         }
     }
 
@@ -352,6 +488,13 @@ struct SplatForgeView: View {
                 .tint(value > 0.9 ? .red : (value > 0.7 ? .orange : .accentColor))
         }
     }
+}
+
+struct PhoneSplatItem {
+    let url: URL
+    let title: String
+    let date: Date
+    let size: String
 }
 
 struct Sparkline: View {

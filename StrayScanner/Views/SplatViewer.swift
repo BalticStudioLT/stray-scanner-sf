@@ -13,9 +13,18 @@ import SwiftUI
 import MetalKit
 import ARKit
 import simd
-import MetalFX
+#if canImport(MetalFX)
+import MetalFX      // not in the Simulator SDK; there the viewer simply draws at full resolution
+#endif
 
 // MARK: - Data
+
+/// Newer Pro phones (8 GB of memory and a faster GPU) start at a higher viewer quality and may stream more splats.
+enum DeviceTier {
+    static let bigMemory = ProcessInfo.processInfo.physicalMemory >= 7_000_000_000
+    static let defaultSplatBudget = bigMemory ? 2_000_000 : 1_000_000
+    static let lodBudgetCap = bigMemory ? 8_000_000 : 6_000_000
+}
 
 enum SplatSource: Equatable, Identifiable {
     /// `sourceScan`: Stray folder the splat was trained from; SplatForge keeps its ARKit coordinates
@@ -869,11 +878,13 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
     var speed: SplatSpeed = .balanced {
         didSet {
             renderer?.lodMinPixels = speed.lodMinPixels
-            scaler = nil
+            resetScaler()
             setNeedsDisplay()
         }
     }
+    #if canImport(MetalFX)
     private var scaler: MTLFXSpatialScaler?
+    #endif
     private var lowTexture: MTLTexture?
     private var upscaled: MTLTexture?
     private var renderer: GaussianSplatRenderer?
@@ -890,7 +901,8 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         super.init(frame: .zero, device: device)
         colorPixelFormat = .bgra8Unorm
         clearColor = MTLClearColor(red: 0.03, green: 0.03, blue: 0.04, alpha: 1)
-        preferredFramesPerSecond = 60
+        // 120 Hz on ProMotion phones while a finger moves the view (Info.plist allows it); idle costs nothing.
+        preferredFramesPerSecond = UIScreen.main.maximumFramesPerSecond
         commandQueue = device.makeCommandQueue()
         renderer = GaussianSplatRenderer(device: device, splats: splats, colorFormat: colorPixelFormat)
         renderer?.commandQueue = commandQueue
@@ -1026,7 +1038,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         let moving = renderer.interactive
         renderer.lodMinPixels = moving ? speed.lodMinPixels : 0
         if moving, speed.renderScale < 1, let device = device, prepareScaler(device: device, output: size),
-           let scaler = scaler, let low = lowTexture, let out = upscaled {
+           let low = lowTexture, let out = upscaled {
             // Splats at reduced resolution → MetalFX spatial upscale → copy to the screen.
             encoder.endEncoding()
             let lowPass = MTLRenderPassDescriptor()
@@ -1041,9 +1053,7 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
                               viewport: CGSize(width: low.width, height: low.height))
                 lowEncoder.endEncoding()
             }
-            scaler.colorTexture = low
-            scaler.outputTexture = out
-            scaler.encode(commandBuffer: commandBuffer)
+            encodeUpscale(commandBuffer, from: low, to: out)
             if let blit = commandBuffer.makeBlitCommandEncoder() {
                 blit.copy(from: out, to: drawable.texture)
                 blit.endEncoding()
@@ -1056,8 +1066,24 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         commandBuffer.commit()
     }
 
+    private func resetScaler() {
+        #if canImport(MetalFX)
+        scaler = nil
+        #endif
+    }
+
+    private func encodeUpscale(_ commandBuffer: MTLCommandBuffer, from low: MTLTexture, to out: MTLTexture) {
+        #if canImport(MetalFX)
+        guard let scaler = scaler else { return }
+        scaler.colorTexture = low
+        scaler.outputTexture = out
+        scaler.encode(commandBuffer: commandBuffer)
+        #endif
+    }
+
     /// (Re)creates the MetalFX scaler and its textures for the current screen size and speed setting.
     private func prepareScaler(device: MTLDevice, output: CGSize) -> Bool {
+        #if canImport(MetalFX)
         let outW = Int(output.width), outH = Int(output.height)
         let inW = max(Int(Float(outW) * speed.renderScale), 16), inH = max(Int(Float(outH) * speed.renderScale), 16)
         if let s = scaler, s.outputWidth == outW, s.outputHeight == outH, s.inputWidth == inW { return true }
@@ -1080,6 +1106,9 @@ final class OrbitSplatView: MTKView, MTKViewDelegate {
         s.inputContentHeight = inH
         scaler = s; lowTexture = low; upscaled = out
         return true
+        #else
+        return false
+        #endif
     }
 }
 
@@ -1362,7 +1391,7 @@ struct SplatViewerScreen: View {
     @State private var failed = false
     @State private var lodStream: SplatLOD?
     /// Quality = how many splats are loaded. SplatForge sends them best-first, so fewer = the most visible ones.
-    @AppStorage("SplatMaxCount") private var maxSplats = 1_000_000
+    @AppStorage("SplatMaxCount") private var maxSplats = DeviceTier.defaultSplatBudget
     @AppStorage("SplatBackground") private var background = SplatBackground.black.rawValue
     @AppStorage("SplatSpeed") private var speed = SplatSpeed.balanced.rawValue
     @AppStorage("SplatOcclusion") private var occlusion = true
@@ -1582,7 +1611,7 @@ struct SplatViewerScreen: View {
             switch source {
             case .studio(let ply, _, _):
                 // Level-of-detail streaming when the Studio offers it: coarse whole scene first, detail near you.
-                let lod = SplatLOD(ply: ply, device: device, budget: min(maxSplats, 6_000_000))
+                let lod = SplatLOD(ply: ply, device: device, budget: min(maxSplats, DeviceTier.lodBudgetCap))
                 if let first = try? await lod.open(progress: { text in Task { @MainActor in status = text } }) {
                     first.pcUp = lod.up
                     loaded = first

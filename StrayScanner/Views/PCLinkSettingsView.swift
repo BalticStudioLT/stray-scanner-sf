@@ -16,6 +16,7 @@ struct PCLinkSettingsView: View {
     @State private var live = false
     @State private var draft = UserDefaults.standard.bool(forKey: "PCLinkDraft")
     @State private var testResult: String?
+    @State private var testOK = false
     @State private var testing = false
 
     var body: some View {
@@ -28,7 +29,7 @@ struct PCLinkSettingsView: View {
                         .keyboardType(.URL)
                     TextField("Port", text: $port)
                         .keyboardType(.numberPad)
-                    TextField("Studio token (A:\\AI\\SplatForge\\.studio_token)", text: $token)
+                    TextField("Studio token", text: $token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.system(.footnote, design: .monospaced))
@@ -45,15 +46,16 @@ struct PCLinkSettingsView: View {
                 } header: {
                     Text("SplatForge PC")
                 } footer: {
-                    Text("Install Tailscale on the iPhone and the PC and sign in to the same account. Use the PC's Tailscale name or 100.x address. Start SplatForge Studio on the PC (port 8777). Token: open the Studio link from the PC (it ends in ?t=…) and paste it here, or scan the Studio’s “Pair phone” QR code. Status and Studio work right away; Send to PC and the live link need the phone receiver in SplatForge (docs/pc-link.md).")
+                    Text("1. The phone and the PC both need Tailscale, signed in to the same account (or the same Wi-Fi).\n2. SplatForge Studio must be running on the PC: start studio.bat in the SplatForge folder.\n3. Pair: copy the Studio link from the PC (it ends in ?t=…) and tap Paste, or scan Studio’s “Pair phone” QR code with the camera.")
                 }
                 Section {
                     Button {
                         save()
                         testing = true
                         testResult = nil
-                        PCUploader.ping(PCLinkSettings.load()) { _, message in
+                        PCUploader.ping(PCLinkSettings.load()) { ok, message in
                             testing = false
+                            testOK = ok
                             testResult = message
                         }
                     } label: {
@@ -63,7 +65,9 @@ struct PCLinkSettingsView: View {
                         }
                     }
                     if let result = testResult {
-                        Text(result).font(.footnote).foregroundStyle(.secondary)
+                        Label(result, systemImage: testOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(testOK ? Color.green : Color.orange)
                     }
                 }
                 Section {

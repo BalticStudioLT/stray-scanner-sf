@@ -42,85 +42,89 @@ class SessionListViewModel: ObservableObject {
         fetchSessions()
     }
 
+    func rename(_ recording: Recording, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        recording.name = trimmed.isEmpty ? nil : trimmed
+        do {
+            try dataContext?.save()
+        } catch let error as NSError {
+            print("Could not rename the scan. \(error), \(error.userInfo)")
+        }
+        fetchSessions()
+    }
+
+    func delete(_ recording: Recording) {
+        sessions.removeAll { $0 == recording }
+        recording.deleteFiles()
+        dataContext?.delete(recording)
+        do {
+            try dataContext?.save()
+        } catch let error as NSError {
+            print("Could not delete the scan. \(error), \(error.userInfo)")
+        }
+    }
+
 }
 
 struct SessionList: View {
     @ObservedObject var viewModel = SessionListViewModel()
-    @State private var showingInfo = false
-    @State private var showingPCLink = false
+    @State private var showingHelp = false
+    @State private var renaming: Recording?
+    @State private var newName = ""
+    @State private var deleting: Recording?
+    @State private var debugDetail = false
+    @State private var debugRecord = false
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 if viewModel.sessions.isEmpty {
-                    VStack(spacing: 14) {
-                        Image(systemName: "viewfinder")
-                            .font(.system(size: 56, weight: .thin))
-                            .foregroundStyle(.secondary)
-                        Text("No scans yet")
-                            .font(.title3.weight(.semibold))
-                        Text("Tap New scan, then walk slowly around the space.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(40)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    emptyState
                 } else {
-                    List {
-                        ForEach(viewModel.sessions, id: \.self) { recording in
-                            NavigationLink(destination: SessionDetailView(recording: recording)) {
-                                SessionRow(session: recording)
-                            }
-                            .listRowBackground(Color.clear)
-                        }
-                        Color.clear.frame(height: 80).listRowBackground(Color.clear)
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
+                    scanList
                 }
-
-                HStack(spacing: 12) {
-                    NavigationLink(destination: NewSessionView()) {
-                        Label("New scan", systemImage: "record.circle")
-                            .font(.title3.weight(.semibold))
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 8)
-                    }
-                    .glassButton(prominent: true)
-                    .tint(.red)
-                    NavigationLink(destination: UltraWideSessionView()) {
-                        Label("0.5×", systemImage: "camera.aperture")
-                            .font(.title3.weight(.semibold))
-                            .padding(.vertical, 8)
-                    }
-                    .glassButton()
-                    .accessibilityLabel("Ultra-wide video, no LiDAR")
-                }
-                .padding(.bottom, 20)
+                newScanBar
             }
             .navigationTitle("Scans")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    NavigationLink(destination: SplatForgeView()) {
-                        Label("PC splats", systemImage: "desktopcomputer").labelStyle(.titleAndIcon)
-                    }
-                    .accessibilityLabel("SplatForge on the PC")
-                }
-                ToolbarItem(placement: .primaryAction) {
                     Button {
-                        showingInfo.toggle()
+                        showingHelp = true
                     } label: {
-                        Image(systemName: "info.circle")
+                        Image(systemName: "questionmark.circle")
                     }
-                    .accessibilityLabel("About")
+                    .accessibilityLabel("How to scan")
                 }
             }
-            .sheet(isPresented: $showingInfo) {
+            .sheet(isPresented: $showingHelp) {
                 InformationView()
             }
-            .sheet(isPresented: $showingPCLink) {
-                PCLinkSettingsView()
+            .alert("Rename scan", isPresented: renamingBinding) {
+                TextField("Name", text: $newName)
+                Button("Save") {
+                    if let recording = renaming { viewModel.rename(recording, to: newName) }
+                    renaming = nil
+                }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            } message: {
+                Text("Leave it empty to show the date again.")
+            }
+            .confirmationDialog("Delete this scan from the phone?", isPresented: deletingBinding, titleVisibility: .visible) {
+                Button("Delete scan", role: .destructive) {
+                    if let recording = deleting { viewModel.delete(recording) }
+                    deleting = nil
+                }
+                Button("Cancel", role: .cancel) { deleting = nil }
+            } message: {
+                Text("The video, depth and any splat trained on the phone are removed. A copy already sent to the PC stays there.")
+            }
+            .navigationDestination(isPresented: $debugDetail) {
+                if let first = viewModel.sessions.first {
+                    SessionDetailView(recording: first)
+                }
+            }
+            .navigationDestination(isPresented: $debugRecord) {
+                NewSessionView()
             }
             .onAppear {
                 DispatchQueue.main.async {
@@ -128,7 +132,149 @@ struct SessionList: View {
                 }
                 let delegate = UIApplication.shared.delegate as! AppDelegate
                 delegate.appDaemon?.removeDeletedEntries()
+                #if DEBUG
+                openForScreenshot()
+                #endif
             }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    #if DEBUG
+    private static var debugOpened = false
+
+    /// Debug builds only (Simulator screenshots): the launch argument `-DebugOpen scan|record|help`
+    /// opens that screen at start. Release builds on the phone do not contain this.
+    private func openForScreenshot() {
+        guard !SessionList.debugOpened, let target = UserDefaults.standard.string(forKey: "DebugOpen") else { return }
+        SessionList.debugOpened = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            switch target {
+            case "scan": debugDetail = !viewModel.sessions.isEmpty
+            case "record": debugRecord = true
+            case "help": showingHelp = true
+            default: break
+            }
+        }
+    }
+    #endif
+
+    private var renamingBinding: Binding<Bool> {
+        Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })
+    }
+
+    private var deletingBinding: Binding<Bool> {
+        Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "viewfinder")
+                .font(.system(size: 56, weight: .thin))
+                .foregroundStyle(.secondary)
+            Text("No scans yet")
+                .font(.title3.weight(.semibold))
+            Text("Tap New scan, then walk slowly around the space. The ? button at the top has a short guide.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var scanList: some View {
+        List {
+            ForEach(viewModel.sessions, id: \.self) { recording in
+                NavigationLink(destination: SessionDetailView(recording: recording)) {
+                    SessionRow(session: recording, title: recording.displayTitle)
+                }
+                .listRowBackground(Color.clear)
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button {
+                        deleting = recording
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .tint(.red)
+                    Button {
+                        newName = recording.customName ?? ""
+                        renaming = recording
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
+                    .tint(.indigo)
+                }
+                .contextMenu {
+                    Button {
+                        newName = recording.customName ?? ""
+                        renaming = recording
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        deleting = recording
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
+            Color.clear.frame(height: 80)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+    }
+
+    private var newScanBar: some View {
+        HStack(spacing: 12) {
+            NavigationLink(destination: NewSessionView()) {
+                Label("New scan", systemImage: "record.circle")
+                    .font(.title3.weight(.semibold))
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
+            }
+            .glassButton(prominent: true)
+            .tint(.red)
+            NavigationLink(destination: UltraWideSessionView()) {
+                Label("0.5×", systemImage: "camera.aperture")
+                    .font(.title3.weight(.semibold))
+                    .padding(.vertical, 8)
+            }
+            .glassButton()
+            .accessibilityLabel("Ultra-wide video, no LiDAR")
+        }
+        .padding(.bottom, 20)
+    }
+}
+
+/// The app's three places: scans on this phone, splats (from the PC or trained here), and settings.
+struct RootView: View {
+    @State private var tab = RootView.initialTab
+
+    /// Debug builds only: `-InitialTab 1` opens another tab at start (Simulator screenshots).
+    private static var initialTab: Int {
+        #if DEBUG
+        return UserDefaults.standard.integer(forKey: "InitialTab")
+        #else
+        return 0
+        #endif
+    }
+
+    var body: some View {
+        TabView(selection: $tab) {
+            SessionList()
+                .tabItem { Label("Scans", systemImage: "viewfinder") }
+                .tag(0)
+            NavigationStack {
+                SplatForgeView()
+            }
+            .tabItem { Label("Splats", systemImage: "cube.transparent") }
+            .tag(1)
+            SettingsView()
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(2)
         }
         .preferredColorScheme(.dark)
     }

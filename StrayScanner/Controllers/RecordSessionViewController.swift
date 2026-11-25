@@ -94,6 +94,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var isoTorchOff: Float?
     private var isoTorchOn: Float?
     static let use4KKey = "Use4KVideo"
+    /// Sharp 12 MP photos beside the video (nil = off); see StillEncoder.
+    private var stillInterval: TimeInterval?
+    private var stillPending = false
+    private var lastStillTime: TimeInterval = 0
+    private var stillFailures = 0
+    private var lastDroppedCount = 0
+    private var lastDropCheck = Date.distantPast
+    private var dropWarningUntil = Date.distantPast
     var dismissFunction: Optional<() -> Void> = Optional.none
 
     // MARK: Views
@@ -170,7 +178,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         startSession()
         updateFpsSetting()
         let pcSettings = PCLinkSettings.load()
-        if pcSettings.live, let link = PCLiveLink(settings: pcSettings) {
+        if pcSettings.live, pcSettings.isPaired, let link = PCLiveLink(settings: pcSettings) {
             liveLink = link
             link.onSummary = { [weak self] good, text in
                 guard let self = self, self.viewIfLoaded?.window != nil else { return }
@@ -203,9 +211,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func startSession() {
         let config = ARWorldTrackingConfiguration()
-        if UserDefaults.standard.bool(forKey: RecordSessionViewController.use4KKey),
-           let format = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+        // Sharp photos need the video format ARKit recommends for them; otherwise 4K when chosen, else the default.
+        let stills = StillSetting.load()
+        if let interval = stills.interval,
+           let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
             config.videoFormat = format
+            stillInterval = interval
+        } else {
+            stillInterval = nil
+            if UserDefaults.standard.bool(forKey: RecordSessionViewController.use4KKey),
+               let format = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+                config.videoFormat = format
+            }
         }
         arConfiguration = config
         renderer?.previewInterval = max(1, config.videoFormat.framesPerSecond / 30)
@@ -560,9 +577,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         pinButton.isEnabled = true
         pinButton.isHidden = false
         timerDot.backgroundColor = .systemRed
-        datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting], exposureController: exposureController)
+        stillPending = false
+        stillFailures = 0
+        lastStillTime = 0
+        lastDroppedCount = 0
+        dropWarningUntil = Date.distantPast
+        datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting],
+                                        exposureController: exposureController, stillInterval: stillInterval)
         var settings = exposureController.captureSettings()
         settings["torch_mode"] = ["off", "on", "alternate_1s"][torchMode.rawValue]
+        // Focus is locked from here on: how far away the scene was at that moment.
+        settings["median_depth_at_start_m"] = qualityMonitor.medianDepth
         if let folder = continueFrom {
             settings["continues_scan"] = folder.lastPathComponent
             settings["relocalized_at_start"] = relocalized
@@ -577,6 +602,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         liveLink?.notifyRecording(scan: datasetEncoder?.directory.lastPathComponent, started: true)
         startRawIMU()
         updateTime()
+        // Capture choices can't change mid-recording (the video size would change under the encoder).
+        layersButton.menu = makeLayersMenu()
     }
 
     private func stopRecording() {
@@ -586,19 +613,30 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         startedRecording = nil
         recordButton.isRecording = false
+        recordButton.isEnabled = false
         worldMapTimer?.invalidate()
         worldMapTimer = nil
         saveWorldMap()
         // Stop IMU updates
         stopRawIMU()
+        timerDot.backgroundColor = UIColor(white: 1, alpha: 0.5)
+        applyAdvice(ScanAdvice(level: .info, text: "Saving the scan…", symbolName: "square.and.arrow.down"))
+        // Finishing the files blocks for a moment; let the "Saving" banner appear first.
+        DispatchQueue.main.async { [weak self] in
+            self?.finishRecording(started)
+        }
+    }
+
+    private func finishRecording(_ started: Date) {
         datasetEncoder?.wrapUp()
         exposureController.unlockAfterRecording()
+        recordButton.isEnabled = true
         shutterButton.isEnabled = true
         fpsButton.isEnabled = true
         closeButton.isEnabled = true
         pinButton.isEnabled = false
         pinButton.isHidden = true
-        timerDot.backgroundColor = UIColor(white: 1, alpha: 0.5)
+        layersButton.menu = makeLayersMenu()
         if let encoder = datasetEncoder {
             switch encoder.status {
                 case .allGood:
@@ -607,10 +645,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                     if PCLinkSettings.load().autoUpload {
                         PCUploader.shared.upload(directory: encoder.directory)
                     }
-                case .videoEncodingError:
+                case .videoEncodingError, .directoryCreationError:
+                    // The alert's OK leaves the screen; leaving right now would hide the alert.
+                    restoreBrightness()
                     showError()
-                case .directoryCreationError:
-                    showError()
+                    return
             }
         } else {
             print("No dataset encoder. Something is wrong.")
@@ -639,11 +678,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func showError() {
-        let controller = UIAlertController(title: "Error",
-            message: "Something went wrong when encoding video. This should not have happened. You might want to file a bug report.",
+        let controller = UIAlertController(title: "The scan could not be saved",
+            message: "Writing the video or depth files failed. Check that the phone has free storage, then scan again.",
             preferredStyle: .alert)
         controller.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Default Action"), style: .default, handler: { _ in
-            self.dismiss(animated: true, completion: nil)
+            self.dismissFunction?()
         }))
         self.present(controller, animated: true, completion: nil)
     }
@@ -778,6 +817,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 var quality = qualityMonitor.currentQuality()
                 quality.torchLevel = exposureController.torchLevel
                 encoder.add(frame: frame, quality: quality)
+                captureStillIfDue(frame)
                 liveLink?.update(frame: frame, savedFrame: encoder.savedFrameCount - 1, quality: quality,
                                  pointCloud: renderer?.pointCloud, recording: true)
             } else {
@@ -788,6 +828,52 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             quality.torchLevel = exposureController.torchLevel
             link.update(frame: frame, savedFrame: nil, quality: quality, pointCloud: renderer?.pointCloud, recording: false)
         }
+    }
+
+    /// Asks ARKit for a full-resolution photo when one is due and the phone is steady enough for it to be sharp.
+    private func captureStillIfDue(_ frame: ARFrame) {
+        guard let interval = stillInterval, !stillPending, let encoder = datasetEncoder, encoder.stillsPending < 2 else { return }
+        let waited = frame.timestamp - lastStillTime
+        guard waited >= interval else { return }
+        guard case .normal = frame.camera.trackingState else { return }
+        // A 12 MP photo shows motion blur about twice as early as the video frame the estimate is for:
+        // wait for a steady moment, but not forever.
+        let blur = qualityMonitor.blurPixels
+        guard blur < 0.8 || (waited > interval * 3 && blur < 2.0) else { return }
+        stillPending = true
+        lastStillTime = frame.timestamp
+        session.captureHighResolutionFrame { [weak self] photo, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.stillPending = false
+                guard let photo = photo else {
+                    self.stillFailures += 1
+                    if let error = error, self.stillFailures == 1 {
+                        print("High-resolution frame failed: \(error.localizedDescription)")
+                    }
+                    // Not available with this camera format after all: stop asking for the rest of this scan.
+                    if self.stillFailures >= 5 && (self.datasetEncoder?.stillCount ?? 0) == 0 {
+                        self.stillInterval = nil
+                    }
+                    return
+                }
+                guard self.startedRecording != nil, let encoder = self.datasetEncoder else { return }
+                encoder.addStill(frame: photo, iso: self.exposureController.snapshot()?.iso)
+            }
+        }
+    }
+
+    /// Frames skipped because saving could not keep up (hot phone, slow storage): say so while it happens.
+    private func droppedFramesAdvice(_ encoder: DatasetEncoder) -> ScanAdvice? {
+        let now = Date()
+        if now.timeIntervalSince(lastDropCheck) >= 2 {
+            let dropped = encoder.droppedFrames
+            if dropped - lastDroppedCount >= 6 { dropWarningUntil = now.addingTimeInterval(4) }
+            lastDroppedCount = dropped
+            lastDropCheck = now
+        }
+        guard now < dropWarningUntil else { return nil }
+        return ScanAdvice(level: .warning, text: "Phone can't keep up — frames skipped. Try 30 fps", symbolName: "speedometer")
     }
 
     // MARK: - HUD
@@ -809,6 +895,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if advice.level.rawValue < ScanAdvice.Level.warning.rawValue {
             if torchCalibrating {
                 advice = ScanAdvice(level: .info, text: "Calibrating light — hold still for 3 s", symbolName: "bolt.badge.clock")
+            } else if startedRecording == nil, qualityMonitor.medianDepth > 0.3, qualityMonitor.medianDepth < 0.8,
+                      continueFrom == nil || relocalized {
+                // Focus is locked when recording starts; locked this close, a room further away comes out soft.
+                advice = ScanAdvice(level: .info, text: "Focus locks at start — for rooms aim about 2 m away first", symbolName: "scope")
             } else if continueFrom != nil && !relocalized {
                 advice = ScanAdvice(level: .warning, text: "Continuing: point at the area you scanned last to line up", symbolName: "arrow.triangle.2.circlepath")
             } else if let pcHint = liveLink?.currentHint {
@@ -819,6 +909,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 advice = weak
             } else if let guide = wallGuide.advice() {
                 advice = guide
+            }
+        }
+        if startedRecording != nil, let encoder = datasetEncoder {
+            if encoder.videoFailed {
+                advice = ScanAdvice(level: .bad, text: "Recording failed — stop and check free storage", symbolName: "xmark.octagon.fill")
+            } else if advice.level.rawValue < ScanAdvice.Level.bad.rawValue, let dropped = droppedFramesAdvice(encoder) {
+                advice = dropped
             }
         }
         applyAdvice(advice)
@@ -1096,16 +1193,49 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             })
         }
         let guide = UIMenu(title: "Wall path guide (sweep floor ↔ ceiling)", options: .displayInline, children: guideItems)
+        // Capture choices: fixed while recording (the video size must not change under the encoder).
+        let recordingNow = startedRecording != nil
+        func choice(_ title: String, _ on: Bool, _ select: @escaping () -> Void) -> UIAction {
+            return UIAction(title: title, attributes: recordingNow ? .disabled : [], state: on ? .on : .off) { [weak self] _ in
+                select()
+                self?.layersButton.menu = self?.makeLayersMenu()
+            }
+        }
+        let quality = VideoQuality.load()
+        var qualityItems: [UIMenuElement] = []
+        for option in VideoQuality.allCases {
+            qualityItems.append(choice("\(option.title) — \(option.detail)", option == quality) { option.save() })
+        }
+        let qualityMenu = UIMenu(title: "Video quality: \(quality.title)", image: UIImage(systemName: "film"), children: qualityItems)
+        let stills = StillSetting.load()
+        let stillsSupported = StillSetting.isSupported
+        var stillItems: [UIMenuElement] = []
+        if stillsSupported {
+            for option in StillSetting.allCases {
+                let title = option == .off ? "Off" : "12 MP, \(option.title)"
+                stillItems.append(choice(title, option == stills) { [weak self] in
+                    option.save()
+                    self?.startSession()
+                    self?.updateFpsSetting()
+                })
+            }
+        }
+        let stillTitle = stillsSupported ? "Sharp photos, beta: \(stills.title)" : "Sharp photos (not on this phone)"
+        let stillMenu = UIMenu(title: stillTitle, image: UIImage(systemName: "photo.on.rectangle"), children: stillItems)
         let has4K = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution != nil
-        var fourK = toggle(has4K ? "4K video (30 fps, ~2× file size)" : "4K video (not supported on this phone)",
-                           "4k.tv", RecordSessionViewController.use4KKey) { [weak self] in
+        let photosOn = stills != .off && stillsSupported
+        let fourKTitle = !has4K ? "4K video (not supported on this phone)"
+            : (photosOn ? "4K video (off while Sharp photos are on)" : "4K video (30 fps, bigger files)")
+        let fourKOn = defaults.bool(forKey: RecordSessionViewController.use4KKey)
+        let fourK = UIAction(title: fourKTitle, image: UIImage(systemName: "4k.tv"),
+                             attributes: (!has4K || photosOn || recordingNow) ? .disabled : [],
+                             state: fourKOn ? .on : .off) { [weak self] _ in
+            defaults.set(!fourKOn, forKey: RecordSessionViewController.use4KKey)
             self?.startSession()
             self?.updateFpsSetting()
+            self?.layersButton.menu = self?.makeLayersMenu()
         }
-        if !has4K || startedRecording != nil {
-            fourK = UIAction(title: fourK.title, image: fourK.image, attributes: .disabled, state: fourK.state) { _ in }
-        }
-        let capture = UIMenu(title: "Capture", options: .displayInline, children: [fourK])
+        let capture = UIMenu(title: "Capture", options: .displayInline, children: [qualityMenu, stillMenu, fourK])
         return UIMenu(title: "", children: [insets, cloud, guide, capture])
     }
 
@@ -1202,20 +1332,23 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let motion = String(format: "Subject %@ · walk %.2f m/s · moved %.1f m", distance, m.linearSpeed, m.distanceTravelled)
         if !statsExpanded {
             // Compact: the two lines that matter while walking; tap the card for everything.
-            let frames = datasetEncoder.map { " · \($0.savedFrameCount) fr" } ?? ""
+            let frames = datasetEncoder.map { " · \($0.savedFrameCount) fr" + ($0.stillCount > 0 ? " · \($0.stillCount) photos" : "") } ?? ""
             let cloud = renderer?.pointCloud
             let cover = String(format: " · %.0f m² · %.0f%% 3+ sides", cloud?.surfaceArea ?? 0, (cloud?.wellCoveredFraction ?? 0) * 100)
             var text = String(format: "%@ · blur %.1f px", exposure, m.blurPixels) + "\n"
                 + String(format: "%.1f m away · moved %.1f m", m.medianDepth, m.distanceTravelled) + frames + cover
             // The PC link state is always shown, so it is obvious whether SplatForge is helping.
             if let link = liveLink { text += "\n" + link.statusText }
-            else if PCLinkSettings.load().isConfigured { text += "\nPC live link off (Settings ▸ SplatForge PC)" }
+            else if PCLinkSettings.load().isPaired { text += "\nPC live link off (Settings ▸ PC link)" }
             statsLabel.text = text
             return
         }
         var lines = [exposure, blur, motion]
         do {
-            let frames = datasetEncoder.map { "Frames \($0.savedFrameCount) · dropped \($0.droppedFrames) · pins \($0.markerCount)" } ?? "Not recording"
+            let frames = datasetEncoder.map {
+                "Frames \($0.savedFrameCount) · dropped \($0.droppedFrames) · pins \($0.markerCount)"
+                    + ($0.stillCount > 0 ? " · photos \($0.stillCount)" : "")
+            } ?? "Not recording"
             let cloud = renderer?.pointCloud
             let surface = String(format: "Scanned ≈ %.0f m² · %.0f%% seen from 3+ sides · LiDAR %.0f%%",
                                  cloud?.surfaceArea ?? 0, (cloud?.wellCoveredFraction ?? 0) * 100, m.confidentFraction * 100)
@@ -1260,7 +1393,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func refreshStorage() {
-        guard !sizeCheckRunning, Date().timeIntervalSince(lastSizeCheck) > 3 else { return }
+        // A long scan holds tens of thousands of small files; walking them every 3 s costs I/O for no benefit.
+        let recordedFor = startedRecording.map { Date().timeIntervalSince($0) } ?? 0
+        let every: TimeInterval = recordedFor > 45 ? 10 : 3
+        guard !sizeCheckRunning, Date().timeIntervalSince(lastSizeCheck) > every else { return }
         sizeCheckRunning = true
         lastSizeCheck = Date()
         let directory = datasetEncoder?.directory

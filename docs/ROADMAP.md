@@ -87,3 +87,35 @@ PC up vector, new viewer UI, full-screen recorder, unique small views, GPU point
 - [x] `start_view`: 3D view opens at the PC's camera with its vertical FOV; double-tap returns there; `i2s_` (one-photo) splats orbit only ±45°.
 - [x] Clamped Jacobian + footprint culling (big splats at the screen edge no longer pop or smear).
 - Test: open a large LOD scene twice (second open instant from cache); walk close → L2 appears without double-bright splats; edge of screen while orbiting has no popping.
+
+## 2026-11-25 — new iPhone 16 Pro, self-review (owner: "specially UI and performance with a scan quality")
+
+Found by reading the code and the owner's old-phone settings (4K, 1/500 s, 2.5 saved frames/s):
+
+**Scan quality**
+- [x] Video quality setting (Standard / High / Maximum): explicit HEVC bit rate, one key frame per second, no frame reordering. Default High (≈ 3× the old bit rate). Before, iOS chose a low rate that smears fine texture.
+- [x] Sharp photos (beta, off by default): ARKit high-resolution frames (≈ 12 MP) once or twice a second while steady, `stills/` + `stills.csv` with own pose and intrinsics. Saved only; SplatForge does not train on them yet (note to Opus).
+- [x] Recording could report "all good" after the video writer failed (a later status overwrote the error) and could hang at Stop when the writer had failed. Both fixed; a failed writer now shows "Recording failed" while scanning.
+- [x] The video file is finished before the scan is zipped/sent (it was finished asynchronously).
+- [x] Capture choices (4K, quality, photos) are locked while recording: changing 4K mid-scan would have changed the video size under the encoder.
+- [x] Hints: "Focus locks at start — aim about 2 m away" before recording when pointing closer than 0.8 m; "Phone can't keep up" when frames are skipped.
+- [x] PC side (splatforge/stray.py): the frame pick window follows the saved frame rate. At 2.5 fps the fixed window of 3 dropped two of every three frames.
+- [ ] PC: train on `stills/`; drop frames with limited tracking (needs a real-scan A/B).
+
+**Performance**
+- [x] Run builds are now optimized (Release). The app on the phone had always been an unoptimized Debug build: slower loading, decoding, mask and PNG work.
+- [x] Scan list: per-scan numbers cached (were re-read from CSV and ~20 000 files on every appearance); thumbnails cached.
+- [x] Viewer: 120 Hz on ProMotion phones while orbiting; on 8 GB phones the default quality is 2 M splats and streaming may use up to 8 M.
+- [x] Storage check while recording: every 10 s after the first 45 s (was every 3 s over all files).
+- [ ] Viewer memory: projected records only for visible splats, SH as 8-bit (from SplatForge's notes).
+
+**UI**
+- [x] Three tabs: Scans / Splats / Settings. Splats tab: phone-scan splats first and newest first, splats trained on the phone, other PC splats, then PC status; finished jobs folded away.
+- [x] Scan list: thumbnail, own name (rename), length, sharp %, size, "On PC" / "Splat" badges, swipe to rename or delete (with confirmation).
+- [x] Settings tab: PC pairing state and test, capture choices, scanning guide. Connection errors say what to do ("Studio is not running — start studio.bat").
+- [x] "Training now" card reads SplatForge's `live` block (was the last snapshot: step 22 001 while the job was at 34 500; PSNR never showed).
+- [x] Dark launch screen; "Saving the scan…" shown while files are finished; clear error when a scan could not be saved.
+- [x] App also builds for the Simulator (MetalFX optional), with Debug-only launch arguments for screenshots.
+- [ ] 4D splat playback in the app (owner 01:03).
+
+Tests for the owner: one scan on High with the usual settings → compare wall texture with an old scan; rename/delete from the list; Splats tab shows the scan's project at the top after training.

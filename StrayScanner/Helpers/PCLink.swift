@@ -87,7 +87,26 @@ struct PCLinkSettings {
     }
     static let pairedNotification = Notification.Name("PCLinkPaired")
 
+    /// Why a request to the PC failed, in plain words, with what to do about it.
+    /// (A Windows PC with Studio closed does not refuse the connection, it stays silent: that is a time-out.)
+    static func explainFailure(_ error: Error, host: String) -> String {
+        switch (error as NSError).code {
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            return "“\(host)” was not found. Turn on Tailscale on this phone, or check the address."
+        case NSURLErrorCannotConnectToHost:
+            return "The PC is on, but SplatForge Studio is not running. On the PC start studio.bat in the SplatForge folder."
+        case NSURLErrorTimedOut:
+            return "No answer. Most often SplatForge Studio is not running on the PC (start studio.bat there). Otherwise the PC is off or asleep, or Tailscale is off."
+        case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+            return "This phone has no network connection right now."
+        default:
+            return error.localizedDescription
+        }
+    }
+
     var isConfigured: Bool { return !host.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// Address and Studio token are both there (a new phone has the default address but no token yet).
+    var isPaired: Bool { return isConfigured && !token.isEmpty }
 
     func url(_ path: String, scheme: String = "http", query: [String: String] = [:]) -> URL? {
         var components = URLComponents()
@@ -131,7 +150,9 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
             let message: String
             var ok = false
             if let error = error {
-                message = error.localizedDescription
+                message = PCLinkSettings.explainFailure(error, host: settings.host)
+            } else if let http = response as? HTTPURLResponse, http.statusCode == 403 {
+                message = "The PC answered but refused the token. Paste the Studio link again."
             } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
                 ok = true
                 let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -175,7 +196,7 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
         let name = directory.lastPathComponent
         let recipe = UserDefaults.standard.bool(forKey: "PCLinkDraft") ? "draft" : "base"
         guard settings.isConfigured, let url = settings.url("/api/scan/upload", query: ["name": name, "recipe": recipe]) else {
-            report(name, nil, "Set the PC address first (Scans ▸ PC link)")
+            report(name, nil, "Pair with the PC first (Settings tab)")
             return
         }
         lock.lock()
@@ -243,7 +264,7 @@ final class PCUploader: NSObject, URLSessionTaskDelegate {
                     if status == "done" {
                         let result = json["result"] as? [String: Any] ?? [:]
                         let psnr = (result["psnr"] as? Double).map { String(format: " · PSNR %.1f", $0) } ?? ""
-                        self.report(scan, nil, "Splat ready on the PC" + psnr + " — open SplatForge to view it")
+                        self.report(scan, nil, "Splat ready on the PC" + psnr + " — it is listed below and in the Splats tab")
                         return
                     }
                     if status == "failed" {
