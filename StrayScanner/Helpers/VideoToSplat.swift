@@ -363,7 +363,7 @@ final class PhoneVideoAligner: ObservableObject {
 
     func cancel() { task?.cancel() }
 
-    func align(video: URL, title: String, framesPerSecond: Double = 2, maxFrames: Int = 150) {
+    func align(video: URL, title: String, framesPerSecond: Double = 4, maxFrames: Int = 300) {
         task?.cancel()
         task = Task { [weak self] in
             guard let self = self else { return }
@@ -394,37 +394,52 @@ final class PhoneVideoAligner: ObservableObject {
         let framesDir = folder.appendingPathComponent("frames", isDirectory: true)
         try FileManager.default.createDirectory(at: framesDir, withIntermediateDirectories: true)
 
-        // Frames: upright, longest side ≤ 1440, about `fps` per second (at most maxFrames).
+        // Frames: upright, longest side ≤ 1440, about `fps` per second (at most maxFrames). Each slot takes the
+        // sharpest of 3 nearby frames (motion blur is what makes the engine lose track), and only the JPEGs are
+        // kept in memory-light form: the engine reads them one by one.
         let asset = AVURLAsset(url: video)
         let duration = try await asset.load(.duration).seconds
         guard duration.isFinite, duration > 1 else { throw TrainError("The video is too short") }
-        let count = min(maxFrames, max(20, Int(duration * fps)))
+        let count = min(maxFrames, max(30, Int(duration * fps)))
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 1440, height: 1440)
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.05, preferredTimescale: 600)
-        var samples: [PhotogrammetrySample] = []
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.02, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.02, preferredTimescale: 600)
+        var times: [Double] = []
         var imageSize = CGSize.zero
-        let context = CIContext()
+        let slot = duration / Double(count)
         for i in 0..<count {
             try Task.checkCancellation()
-            let t = (Double(i) + 0.5) / Double(count) * duration
-            guard let cg = try? await generator.image(at: CMTime(seconds: t, preferredTimescale: 600)).image else { continue }
+            var best: (CGImage, Double, Double)?
+            for k in 0..<3 {
+                let t = (Double(i) + (Double(k) + 0.5) / 3) * slot
+                guard let cg = try? await generator.image(at: CMTime(seconds: t, preferredTimescale: 600)).image else { continue }
+                let sharp = PhoneVideoAligner.sharpness(cg)
+                if best == nil || sharp > best!.1 { best = (cg, sharp, t) }
+            }
+            guard let (cg, _, t) = best else { continue }
             imageSize = CGSize(width: cg.width, height: cg.height)
-            let jpg = framesDir.appendingPathComponent(String(format: "%06d.jpg", samples.count))
-            if let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.92) { try data.write(to: jpg) }
-            guard let buffer = PhoneVideoAligner.pixelBuffer(cg, context: context) else { continue }
-            samples.append(PhotogrammetrySample(id: samples.count, image: buffer))
-            state = .working("Taking frames \(samples.count) / \(count)", Double(i + 1) / Double(count) * 0.2)
+            let jpg = framesDir.appendingPathComponent(String(format: "%06d.jpg", times.count))
+            guard let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.92) else { continue }
+            try data.write(to: jpg)
+            times.append(t)
+            state = .working("Taking the sharpest frames \(times.count) / \(count)", Double(i + 1) / Double(count) * 0.2)
         }
-        guard samples.count >= 12 else { throw TrainError("Could not read enough frames from the video") }
+        let frameDir = framesDir
+        let ciContext = CIContext()
+        let samples = (0..<times.count).lazy.compactMap { id -> PhotogrammetrySample? in
+            guard let image = UIImage(contentsOfFile: frameDir.appendingPathComponent(String(format: "%06d.jpg", id)).path)?.cgImage,
+                  let buffer = PhoneVideoAligner.pixelBuffer(image, context: ciContext) else { return nil }
+            return PhotogrammetrySample(id: id, image: buffer)
+        }
+        guard times.count >= 12 else { throw TrainError("Could not read enough frames from the video") }
         // Copy the video itself (thumbnail, playback, sending to the PC later).
         // (Named rgb.mp4 like a LiDAR scan so thumbnails and replay find it; AVFoundation reads MOV content fine.)
         let rgb = folder.appendingPathComponent("rgb.mp4")
         try? FileManager.default.copyItem(at: video, to: rgb)
 
-        note("\(samples.count) frames taken, \(Int(imageSize.width))×\(Int(imageSize.height)) px")
+        note("\(times.count) sharp frames taken, \(Int(imageSize.width))×\(Int(imageSize.height)) px")
         state = .working("Finding the camera path…", 0.2)
         stepStarted = Date()
         var configuration = PhotogrammetrySession.Configuration()
@@ -463,7 +478,16 @@ final class PhoneVideoAligner: ObservableObject {
                 switch result {
                 case .poses(let p):
                     poses = p
-                    note("camera path done: \(p.posesBySample.count) of \(samples.count) frames placed")
+                    note("camera path done: \(p.posesBySample.count) of \(times.count) frames placed")
+                    if p.posesBySample.count < times.count * 6 / 10 {
+                        // Where did it lose track? (first frame after the longest placed run)
+                        let placed = Set(p.posesBySample.keys)
+                        var run = 0, bestRun = 0, bestEnd = 0
+                        for id in 0..<times.count { if placed.contains(id) { run += 1; if run > bestRun { bestRun = run; bestEnd = id } } else { run = 0 } }
+                        let lost = min(bestEnd + 1, times.count - 1)
+                        note(String(format: "lost track near %d:%02d in the video (moved too fast / too little overlap)",
+                                    Int(times[lost]) / 60, Int(times[lost]) % 60))
+                    }
                     state = .working("Making the starting points…", 0.8)
                     stepStarted = Date()
                 case .pointCloud(let c):
@@ -526,7 +550,7 @@ final class PhoneVideoAligner: ObservableObject {
             if #available(iOS 26.0, *), let k = pose.intrinsics {
                 fx = k.columns.0.x; fy = k.columns.1.y; cx = k.columns.2.x; cy = k.columns.2.y
             }
-            csv += "\(Double(id) / fps), \(String(format: "%06d", id)), \(t.x), \(t.y), \(t.z), \(q.x), \(q.y), \(q.z), \(q.w), "
+            csv += "\(id < times.count ? times[id] : Double(id) / fps), \(String(format: "%06d", id)), \(t.x), \(t.y), \(t.z), \(q.x), \(q.y), \(q.z), \(q.w), "
                 + "\(fx), \(fy), \(cx), \(cy), , \n"
         }
         try csv.write(to: folder.appendingPathComponent("odometry.csv"), atomically: true, encoding: .utf8)
@@ -539,7 +563,7 @@ final class PhoneVideoAligner: ObservableObject {
         try binary.write(to: folder.appendingPathComponent("points.bin"))
         let settings: [String: Any] = ["source": "phone_aligned_video", "video_width": Int(w), "video_height": Int(h),
                                        "frames_dir": "frames", "aligned_frames": found.posesBySample.count,
-                                       "frames_taken": samples.count, "points": points.count, "scale_to_metres": scale,
+                                       "frames_taken": times.count, "points": points.count, "scale_to_metres": scale,
                                        "alignment": "RealityKit PhotogrammetrySession (on the phone)", "video_frame_offset": 0]
         let json = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
         try json.write(to: folder.appendingPathComponent("capture_settings.json"))
@@ -557,7 +581,7 @@ final class PhoneVideoAligner: ObservableObject {
         try context2.save()
         NotificationCenter.default.post(name: NSNotification.Name("sessionsChanged"), object: nil)
         try? FileManager.default.removeItem(at: video)
-        return "\(found.posesBySample.count) of \(samples.count) frames aligned · \(points.count) points"
+        return "\(found.posesBySample.count) of \(times.count) frames aligned · \(points.count) points"
     }
 
     private static func pixelBuffer(_ image: CGImage, context: CIContext) -> CVPixelBuffer? {

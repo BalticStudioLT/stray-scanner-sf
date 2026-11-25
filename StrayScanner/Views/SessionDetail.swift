@@ -121,15 +121,20 @@ struct SessionDetailView: View {
                     .glassButton()
                 }
 
-                if let folder = folder, canContinue {
-                    NavigationLink(destination: NewSessionView(continueFrom: folder)) {
-                        Label("Continue", systemImage: "arrow.triangle.2.circlepath")
+                // Train here: any scan with a camera path (LiDAR scans, and videos aligned on the phone). It used to
+                // sit with Continue, so scans without a saved AR map (and all videos) had no button.
+                if let folder = folder, FileManager.default.fileExists(atPath: folder.appendingPathComponent("odometry.csv").path) {
+                    NavigationLink(destination: PhoneTrainView(folder: folder)) {
+                        Label("Train here", systemImage: "cpu")
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, minHeight: 32)
                     }
                     .glassButton()
-                    NavigationLink(destination: PhoneTrainView(folder: folder)) {
-                        Label("Train here", systemImage: "cpu")
+                }
+
+                if let folder = folder, canContinue {
+                    NavigationLink(destination: NewSessionView(continueFrom: folder)) {
+                        Label("Continue", systemImage: "arrow.triangle.2.circlepath")
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, minHeight: 32)
                     }

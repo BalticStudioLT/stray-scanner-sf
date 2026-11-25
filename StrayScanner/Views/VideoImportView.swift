@@ -62,7 +62,7 @@ struct VideoActionsSheet: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Align on this phone (beta)", systemImage: "iphone").font(.headline)
-                        Text("No PC needed. Apple's photogrammetry finds the camera path from about 150 frames (works best for objects and small spaces, filmed slowly with lots of overlap). The result is added to Scans, where Train here makes the splat.")
+                        Text("No PC needed. Apple's photogrammetry finds the camera path from up to 300 of the sharpest frames (4 per second; works best for objects and small spaces, filmed slowly with lots of overlap). The result is added to Scans, where Train here makes the splat.")
                             .font(.caption).foregroundStyle(.secondary)
                         alignerStatus
                         if !PhoneVideoAligner.isSupported {
