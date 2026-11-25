@@ -341,7 +341,10 @@ final class PhoneVideoAligner: ObservableObject {
     @Published private(set) var state: State = .idle
     private var task: Task<Void, Never>?
 
-    static var isSupported: Bool { PhotogrammetrySession.isSupported }
+    static var isSupported: Bool {
+        if #available(iOS 17.0, *) { return PhotogrammetrySession.isSupported }
+        return false
+    }
 
     func cancel() { task?.cancel() }
 
@@ -350,6 +353,7 @@ final class PhoneVideoAligner: ObservableObject {
         task = Task { [weak self] in
             guard let self = self else { return }
             do {
+                guard #available(iOS 17.0, *) else { throw TrainError("Needs iOS 17 or newer") }
                 let name = try await self.run(video: video, title: title, fps: framesPerSecond, maxFrames: maxFrames)
                 self.state = .done(name)
             } catch is CancellationError {
@@ -360,6 +364,7 @@ final class PhoneVideoAligner: ObservableObject {
         }
     }
 
+    @available(iOS 17.0, *)
     private func run(video: URL, title: String, fps: Double, maxFrames: Int) async throws -> String {
         guard PhotogrammetrySession.isSupported else {
             throw TrainError("This phone cannot run Apple's photogrammetry (needs an iPhone Pro with LiDAR)")
@@ -461,7 +466,7 @@ final class PhoneVideoAligner: ObservableObject {
             let t = pose.translation * scale
             let q = (pose.rotation * toCV).vector
             var fx = defaultFocal, fy = defaultFocal, cx = w / 2, cy = h / 2
-            if let k = pose.intrinsics {
+            if #available(iOS 26.0, *), let k = pose.intrinsics {
                 fx = k.columns.0.x; fy = k.columns.1.y; cx = k.columns.2.x; cy = k.columns.2.y
             }
             csv += "\(Double(id) / fps), \(String(format: "%06d", id)), \(t.x), \(t.y), \(t.z), \(q.x), \(q.y), \(q.z), \(q.w), "
