@@ -115,7 +115,20 @@ struct VideoActionsSheet: View {
         case .working(let text, let progress):
             VStack(alignment: .leading, spacing: 4) {
                 if let p = progress { ProgressView(value: p) } else { ProgressView() }
-                Text(text).font(.caption).foregroundStyle(.secondary)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    HStack {
+                        Text(text).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        if let start = aligner.stepStarted {
+                            // Ticks every second, so a long step never looks frozen.
+                            Text(Self.clock(context.date.timeIntervalSince(start)))
+                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                ForEach(aligner.log, id: \.self) { line in
+                    Text(line).font(.caption2.monospaced()).foregroundStyle(.tertiary).lineLimit(1)
+                }
                 Text("Keep the app open.").font(.caption2).foregroundStyle(.secondary)
             }
         case .done(let text):
@@ -124,6 +137,11 @@ struct VideoActionsSheet: View {
         case .failed(let text):
             Label(text, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
         }
+    }
+
+    static func clock(_ t: TimeInterval) -> String {
+        let s = max(0, Int(t))
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 
     private func loadThumbnail() {

@@ -160,7 +160,12 @@ final class VideoUploader: NSObject, ObservableObject, URLSessionDataDelegate {
         let parts = (task.taskDescription ?? "").split(separator: "|").map(String.init)
         guard parts.count >= 2, parts[0] == "upload", totalBytesExpectedToSend > 0 else { return }
         let p = Double(totalBytesSent) / Double(totalBytesExpectedToSend)
-        update(parts[1]) { $0.progress = p; $0.status = String(format: "Uploading %.0f%% — you can lock the phone", p * 100) }
+        let mb = { (b: Int64) in Double(b) / 1_048_576 }
+        let text = p >= 0.999
+            ? "Uploaded — the PC is saving the file and starting the job…"
+            : String(format: "Uploading %.0f%% · %.0f / %.0f MB — you can lock the phone",
+                     p * 100, mb(totalBytesSent), mb(totalBytesExpectedToSend))
+        update(parts[1]) { $0.progress = p >= 0.999 ? nil : p; $0.status = text }
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -339,6 +344,16 @@ enum ImmichClient {
 final class PhoneVideoAligner: ObservableObject {
     enum State: Equatable { case idle, working(String, Double?), done(String), failed(String) }
     @Published private(set) var state: State = .idle
+    /// The last couple of things the engine reported (shown under the progress bar so it never looks frozen).
+    @Published private(set) var log: [String] = []
+    @Published private(set) var started: Date?
+    @Published private(set) var stepStarted: Date?
+
+    private func note(_ line: String) {
+        let elapsed = started.map { Int(Date().timeIntervalSince($0)) } ?? 0
+        log.append(String(format: "%d:%02d  ", elapsed / 60, elapsed % 60) + line)
+        if log.count > 2 { log.removeFirst(log.count - 2) }
+    }
     private var task: Task<Void, Never>?
 
     static var isSupported: Bool {
@@ -369,6 +384,9 @@ final class PhoneVideoAligner: ObservableObject {
         guard PhotogrammetrySession.isSupported else {
             throw TrainError("This phone cannot run Apple's photogrammetry (needs an iPhone Pro with LiDAR)")
         }
+        started = Date()
+        stepStarted = Date()
+        log = []
         state = .working("Reading the video…", nil)
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let folderName = "v" + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(9)).lowercased()
@@ -406,7 +424,9 @@ final class PhoneVideoAligner: ObservableObject {
         let rgb = folder.appendingPathComponent("rgb.mp4")
         try? FileManager.default.copyItem(at: video, to: rgb)
 
-        state = .working("Aligning cameras on the phone…", 0.2)
+        note("\(samples.count) frames taken, \(Int(imageSize.width))×\(Int(imageSize.height)) px")
+        state = .working("Finding the camera path…", 0.2)
+        stepStarted = Date()
         var configuration = PhotogrammetrySession.Configuration()
         configuration.sampleOrdering = .sequential
         configuration.featureSensitivity = .high
@@ -415,25 +435,62 @@ final class PhoneVideoAligner: ObservableObject {
         var poses: PhotogrammetrySession.Poses?
         var cloud: PhotogrammetrySession.PointCloud?
         var failure: String?
-        for try await output in session.outputs {
-            try Task.checkCancellation()
+        // Two requests run one after the other: camera path (poses), then the sparse points.
+        var lastStage = ""
+        var lastPercent = -1
+        outputs: for try await output in session.outputs {
+            if Task.isCancelled { session.cancel(); throw CancellationError() }
             switch output {
-            case .requestProgress(_, let fraction):
-                state = .working("Aligning cameras on the phone…", 0.2 + 0.8 * fraction)
+            case .requestProgress(let request, let fraction):
+                let isPoses: Bool
+                if case .poses = request { isPoses = true } else { isPoses = false }
+                let overall = isPoses ? 0.2 + 0.6 * fraction : 0.8 + 0.2 * fraction
+                state = .working(isPoses ? "Finding the camera path…" : "Making the starting points…", overall)
+                let percent = Int(fraction * 100)
+                if percent / 25 != lastPercent / 25 {
+                    lastPercent = percent
+                    note((isPoses ? "camera path " : "points ") + "\(percent)%")
+                }
+            case .requestProgressInfo(_, let info):
+                let stage = info.processingStage.map { "\($0)" } ?? ""
+                if !stage.isEmpty, stage != lastStage {
+                    lastStage = stage
+                    var line = "stage: " + stage
+                    if let left = info.estimatedRemainingTime, left > 1 { line += String(format: " · ~%.0f s left", left) }
+                    note(line)
+                }
             case .requestComplete(_, let result):
                 switch result {
-                case .poses(let p): poses = p
-                case .pointCloud(let c): cloud = c
+                case .poses(let p):
+                    poses = p
+                    note("camera path done: \(p.posesBySample.count) of \(samples.count) frames placed")
+                    state = .working("Making the starting points…", 0.8)
+                    stepStarted = Date()
+                case .pointCloud(let c):
+                    cloud = c
+                    note("points done: \(c.points.count)")
                 default: break
                 }
-            case .requestError(_, let error):
-                failure = error.localizedDescription
+            case .requestError(let request, let error):
+                if case .pointCloud = request {
+                    note("points failed (\(error.localizedDescription)))")
+                } else {
+                    failure = error.localizedDescription
+                    note("camera path failed: " + error.localizedDescription)
+                }
+            case .invalidSample(let id, let reason):
+                note("frame \(id) skipped: \(reason)")
+            case .skippedSample(let id):
+                note("frame \(id) skipped")
             case .processingComplete:
-                break
+                break outputs          // the stream does not always end by itself
+            case .processingCancelled:
+                throw CancellationError()
             default:
                 break
             }
         }
+        state = .working("Writing the scan…", 1)
         guard let found = poses, found.posesBySample.count >= 8 else {
             try? FileManager.default.removeItem(at: folder)
             throw TrainError("Alignment failed" + (failure.map { ": \($0)" } ?? " — too few frames matched")
