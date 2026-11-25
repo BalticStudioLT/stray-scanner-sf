@@ -30,6 +30,7 @@ struct PhoneTrainOptions {
     static let moveKey = "TrainMovePositions", flatKey = "TrainFlatSplats", depthKey = "TrainLidarDepth"
     static let ssimKey = "TrainSSIM", relocateKey = "TrainRelocate", shKey = "TrainAngleColour"
     static let resolutionKey = "TrainResolution", lengthKey = "TrainLength"
+    static let denseKey = "TrainDenseStart", framesKey = "TrainMoreFrames"
 
     var movePositions = true
     var flatSplats = true
@@ -37,8 +38,14 @@ struct PhoneTrainOptions {
     var ssim = true
     var relocate = true
     var angleColour = true
-    var width = 720            // 480 or 720
-    var iterations = 7000      // 3000 quick, 7000 better, 15000 best
+    var width = 720            // 480, 720 or 1080
+    var iterations = 7000      // 3000 quick, 7000 better, 15000 best, 30000 max
+    var denseStart = false     // splats every 1 cm (up to 1 M) instead of 1.5 cm (up to 400 k)
+    var moreFrames = false     // 300 keyframes instead of 150 (150 at 1080 px: memory)
+
+    var keyframeCount: Int { moreFrames && width <= 720 ? 300 : 150 }
+    var voxel: Float { denseStart ? 0.010 : 0.015 }
+    var maxSplats: Int { denseStart ? 1_000_000 : 400_000 }
 
     static func load() -> PhoneTrainOptions {
         let d = UserDefaults.standard
@@ -46,8 +53,16 @@ struct PhoneTrainOptions {
         var o = PhoneTrainOptions()
         o.movePositions = flag(moveKey); o.flatSplats = flag(flatKey); o.lidarDepth = flag(depthKey)
         o.ssim = flag(ssimKey); o.relocate = flag(relocateKey); o.angleColour = flag(shKey)
-        if d.object(forKey: resolutionKey) != nil { o.width = d.integer(forKey: resolutionKey) == 480 ? 480 : 720 }
-        if d.object(forKey: lengthKey) != nil { o.iterations = [3000, 7000, 15000].contains(d.integer(forKey: lengthKey)) ? d.integer(forKey: lengthKey) : 7000 }
+        if d.object(forKey: resolutionKey) != nil {
+            let w = d.integer(forKey: resolutionKey)
+            o.width = [480, 720, 1080].contains(w) ? w : 720
+        }
+        if d.object(forKey: lengthKey) != nil {
+            let l = d.integer(forKey: lengthKey)
+            o.iterations = [3000, 7000, 15000, 30000].contains(l) ? l : 7000
+        }
+        o.denseStart = d.bool(forKey: denseKey)
+        o.moreFrames = d.bool(forKey: framesKey)
         return o
     }
 
@@ -60,7 +75,8 @@ struct PhoneTrainOptions {
         if ssim { parts.append("SSIM") }
         if relocate { parts.append("relocation") }
         if angleColour { parts.append("angle colour") }
-        return (parts.isEmpty ? "basic" : parts.joined(separator: ", ")) + " · \(width) px · \(iterations) steps"
+        if denseStart { parts.append("dense start") }
+        return (parts.isEmpty ? "basic" : parts.joined(separator: ", ")) + " · \(width) px · \(keyframeCount) frames · \(iterations) steps"
     }
 }
 
@@ -155,18 +171,24 @@ final class PhoneTrainer: ObservableObject {
     private func run() throws {
         guard let device = MTLCreateSystemDefaultDevice(), let library = device.makeDefaultLibrary(),
               let queue = device.makeCommandQueue() else { throw TrainError("No Metal GPU") }
-        let opt = options
+        var opt = options
+        if ProcessInfo.processInfo.physicalMemory < 7_000_000_000 {
+            // 6 GB phones: keep within memory.
+            opt.width = min(opt.width, 720)
+            opt.moreFrames = false
+        }
         publish(.loading("Reading the scan…"))
         let scan = try ScanData(folder: folder)
         publish(.loading("Picking sharp frames…"))
-        let picks = scan.pickKeyframes(max: 150)
+        let picks = scan.pickKeyframes(max: opt.keyframeCount)
         guard picks.count >= 8 else { throw TrainError("Not enough sharp frames with poses") }
         let width = opt.width, height = Int((Float(opt.width) * scan.videoHeight / scan.videoWidth).rounded())
         publish(.loading("Decoding \(picks.count) frames…"))
         let (keyframes, cgImages) = try loadKeyframes(scan: scan, frames: picks, width: width, height: height,
                                                       device: device, withDepth: opt.lidarDepth)
         publish(.loading("Placing splats on the LiDAR points…"))
-        let initial = initialSplats(scan: scan, frames: picks, images: cgImages, width: width, height: height)
+        let initial = initialSplats(scan: scan, frames: picks, images: cgImages, width: width, height: height,
+                                    voxel: opt.voxel, maxSplats: opt.maxSplats)
         guard initial.count > 1000 else { throw TrainError("Too little LiDAR depth in this scan") }
         let n = initial.count
         let P = PhoneTrainer.P, G = PhoneTrainer.G
@@ -496,10 +518,9 @@ final class PhoneTrainer: ObservableObject {
 
     /// One splat per 1.5 cm voxel of confident LiDAR depth, coloured from the frame it was seen in.
     private func initialSplats(scan: ScanData, frames: [ScanData.Pose], images: [Int: CGImage],
-                               width: Int, height: Int) -> [TrainParams] {
+                               width: Int, height: Int, voxel: Float = 0.015, maxSplats: Int = 400_000) -> [TrainParams] {
         var seen = Set<Int64>()
         var out: [TrainParams] = []
-        let voxel: Float = 0.015
         for pose in frames {
             guard let image = images[pose.frame], let pixels = PhoneTrainer.rgba(image),
                   let depth = DepthPNG.load(folder.appendingPathComponent("depth").appendingPathComponent(String(format: "%06d.png", pose.frame)))
@@ -523,7 +544,7 @@ final class PhoneTrainer: ObservableObject {
                     let o = (py * width + px) * 4
                     let rgb = SIMD3<Float>(Float(pixels[o]), Float(pixels[o + 1]), Float(pixels[o + 2])) / 255
                     out.append(TrainParams(rgb: rgb, opacityLogit: -2.2, logScale: log(voxel), position: p))
-                    if out.count >= 400_000 { return PhoneTrainer.nnScales(out, voxel: voxel) }
+                    if out.count >= maxSplats { return PhoneTrainer.nnScales(out, voxel: voxel) }
                 }
             }
         }
@@ -699,6 +720,8 @@ struct PhoneTrainView: View {
     @AppStorage(PhoneTrainOptions.shKey) private var optSH = true
     @AppStorage(PhoneTrainOptions.resolutionKey) private var optWidth = 720
     @AppStorage(PhoneTrainOptions.lengthKey) private var optLength = 7000
+    @AppStorage(PhoneTrainOptions.denseKey) private var optDense = false
+    @AppStorage(PhoneTrainOptions.framesKey) private var optFrames = false
     @Environment(\.dismiss) private var dismiss
 
     init(folder: URL) {
@@ -802,25 +825,38 @@ struct PhoneTrainView: View {
                 } footer: {
                     Text("Moving starts after 30 % of the steps, flat splats after 50 %. The LiDAR option only works while splats move. Turn everything off for the old quick trainer.")
                 }
-                Section("Quality") {
+                Section {
                     Picker("Frame size", selection: $optWidth) {
                         Text("480 px (faster)").tag(480)
                         Text("720 px (sharper)").tag(720)
+                        Text("1080 px (max, slow)").tag(1080)
                     }
                     Picker("Length", selection: $optLength) {
                         Text("Quick · 3 000 steps").tag(3000)
                         Text("Better · 7 000 steps").tag(7000)
                         Text("Best · 15 000 steps").tag(15000)
+                        Text("Max · 30 000 steps").tag(30000)
                     }
+                    Toggle("Denser start (1 cm, up to 1 M splats)", isOn: $optDense)
+                    Toggle("More frames (300)", isOn: $optFrames)
+                        .disabled(optWidth > 720)
+                } header: {
+                    Text("Quality")
+                } footer: {
+                    Text("Max settings: 1080 px, Max length, denser start. Roughly 30–60 minutes and a warm phone; keep it on the charger. More frames is only used up to 720 px (memory).")
                 }
                 Section {
                     Button("All on (recommended)") {
                         optMove = true; optFlat = true; optDepth = true; optSSIM = true; optRelocate = true; optSH = true
-                        optWidth = 720; optLength = 7000
+                        optWidth = 720; optLength = 7000; optDense = false; optFrames = false
+                    }
+                    Button("Maximum quality (slow)") {
+                        optMove = true; optFlat = true; optDepth = true; optSSIM = true; optRelocate = true; optSH = true
+                        optWidth = 1080; optLength = 30000; optDense = true; optFrames = false
                     }
                     Button("All off (old quick trainer)") {
                         optMove = false; optFlat = false; optDepth = false; optSSIM = false; optRelocate = false; optSH = false
-                        optWidth = 480; optLength = 3000
+                        optWidth = 480; optLength = 3000; optDense = false; optFrames = false
                     }
                 }
             }

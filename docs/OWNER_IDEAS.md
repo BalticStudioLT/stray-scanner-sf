@@ -69,3 +69,4 @@ Every request/idea from the owner, newest last, so nothing gets lost.
 - 2026-11-25 10:50 [screenshot: Train on phone "Could not train: Too little LiDAR depth in this scan"] "And what is this" → two bugs: depth PNGs were colour-converted when read (0.98 m read as a few mm) and at fps divider >1 keyframes got pictures from the wrong time; both fixed
 - 2026-11-25 11:13 "can phone do better splat?"
 - 2026-11-25 11:15 "add all but make all as options" (phone trainer v2: move/stretch/rotate, LiDAR depth loss, SSIM, MCMC relocation, 720 px + longer + SH1 — each as an option)
+- 2026-11-25 11:26 "can we push it more?" → added Max options: 1080 px frames, 30 000 steps, denser start (1 cm, up to 1 M splats), 300 frames
