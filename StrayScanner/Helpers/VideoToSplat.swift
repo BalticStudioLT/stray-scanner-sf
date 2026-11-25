@@ -584,6 +584,23 @@ final class PhoneVideoAligner: ObservableObject {
         return "\(found.posesBySample.count) of \(times.count) frames aligned · \(points.count) points"
     }
 
+    /// Edge energy of a small grey copy: higher = sharper (less motion blur).
+    static func sharpness(_ image: CGImage) -> Double {
+        let w = 192, h = max(8, Int(Double(image.height) / Double(image.width) * 192))
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0 }
+        ctx.interpolationQuality = .low
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var sum = 0.0
+        for y in 1..<h { for x in 1..<w {
+            let c = Double(pixels[y * w + x])
+            let dx = c - Double(pixels[y * w + x - 1]), dy = c - Double(pixels[(y - 1) * w + x])
+            sum += dx * dx + dy * dy
+        } }
+        return sum / Double(w * h)
+    }
+
     private static func pixelBuffer(_ image: CGImage, context: CIContext) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
         let attributes: [CFString: Any] = [kCVPixelBufferCGImageCompatibilityKey: true,
