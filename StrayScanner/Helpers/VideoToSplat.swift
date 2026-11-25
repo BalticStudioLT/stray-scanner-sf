@@ -25,12 +25,12 @@ import CoreImage
 struct PickedMovie: Transferable {
     let url: URL
 
+    // Photos hands over the exact type (QuickTime, MPEG-4, …); a generic "movie" alone is not always matched.
     static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { movie in
-            SentTransferredFile(movie.url)
-        } importing: { received in
-            PickedMovie(url: try VideoInbox.keep(received.file))
-        }
+        FileRepresentation(importedContentType: .quickTimeMovie) { PickedMovie(url: try VideoInbox.keep($0.file)) }
+        FileRepresentation(importedContentType: .mpeg4Movie) { PickedMovie(url: try VideoInbox.keep($0.file)) }
+        FileRepresentation(importedContentType: .appleProtectedMPEG4Video) { PickedMovie(url: try VideoInbox.keep($0.file)) }
+        FileRepresentation(importedContentType: .movie) { PickedMovie(url: try VideoInbox.keep($0.file)) }
     }
 }
 

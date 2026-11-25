@@ -261,7 +261,8 @@ enum PhotosVideoLoader {
             try data.write(to: url)
             return PendingVideo(url: url, title: "Video from Photos")
         }
-        throw TrainError("Photos did not hand over the video")
+        throw TrainError("Photos did not hand over the video (types: "
+                         + item.supportedContentTypes.map(\.identifier).joined(separator: ", ") + ")")
     }
 }
 
